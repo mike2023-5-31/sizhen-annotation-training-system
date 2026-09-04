@@ -1,7 +1,9 @@
-"""数据集 CRUD 路由（T6，需求 6.1）+ 内置库拉取（T8，需求 6.2b）。
+"""数据集 CRUD 路由（T6，需求 6.1）+ 内置库拉取（T8，需求 6.2b）+
+ZIP 导出（T11，需求 6.5）。
 
 前缀 ``/datasets``，挂载于 ``main.api_router``（整体 ``/api`` 前缀）后对外为
-``/api/datasets``。T7 的 ZIP 导入将追加到本 router（plan 约定）。
+``/api/datasets``。T7 的 ZIP 导入追加在本 router（plan 约定）；T11 的导出
+同样追加于此。
 
 错误映射：
 - ``ValueError``（目标不存在）→ 404；
@@ -10,15 +12,18 @@
 """
 from __future__ import annotations
 
+import io
 from datetime import datetime
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 
 from app.models.orm import Dataset
 from app.schemas.dataset import DatasetCreate, DatasetOut, DatasetRename
-from app.services import dataset_service
+from app.services import dataset_service, export_service
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -93,3 +98,28 @@ def pull_records(payload: PullRecordsIn) -> dict[str, int]:
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{dataset_id}/export")
+def export_dataset(dataset_id: int) -> StreamingResponse:
+    """数据集整体导出为 ZIP（T11，需求 6.5）：images/ 图片 + annotations/ 同名 XML。
+
+    流式返回 ``application/zip``，Content-Disposition 携带数据集名（RFC 5987
+    编码）；数据集不存在 → 404；空数据集 → 合法空 ZIP（REQ-6.5-4）。
+    """
+    try:
+        dataset_name = export_service.get_dataset_name(dataset_id)
+        zip_bytes = export_service.export_dataset(dataset_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return StreamingResponse(
+        io.BytesIO(zip_bytes),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=dataset-{dataset_id}.zip; "
+                f"filename*=UTF-8''{quote(dataset_name)}.zip"
+            )
+        },
+    )
