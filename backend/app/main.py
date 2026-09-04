@@ -7,7 +7,8 @@
 - ``/static``：静态图片服务，根目录 = ``<DATA_DIR>/datasets``。
 - 全局异常处理器：统一返回 JSON ``{"detail": ...}``。
 
-依赖边界：本文件不 import ``app.db`` / ``app.models``（T4 职责）。
+依赖边界：本文件不直接 import ``app.db`` / ``app.models``（T4 职责）；
+业务依赖经 routers → services 间接引用（T6 起）。
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import config
+from app.routers import datasets
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -47,6 +49,10 @@ api_router = APIRouter(prefix="/api")
 @api_router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# 业务路由（数据集 CRUD，T6）
+api_router.include_router(datasets.router)
 
 
 app.include_router(api_router)

@@ -13,6 +13,11 @@ const router = createRouter({
       name: 'home',
       component: HomePlaceholder,
     },
+    {
+      path: '/datasets',
+      name: 'datasets',
+      component: () => import('../views/DatasetManage.vue'),
+    },
   ],
 })
 
