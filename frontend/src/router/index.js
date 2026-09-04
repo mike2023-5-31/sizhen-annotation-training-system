@@ -18,6 +18,11 @@ const router = createRouter({
       name: 'datasets',
       component: () => import('../views/DatasetManage.vue'),
     },
+    {
+      path: '/annotate',
+      name: 'annotate',
+      component: () => import('../views/Annotate.vue'),
+    },
   ],
 })
 
