@@ -1,0 +1,5 @@
+[project]
+name = "sizhen-backend"
+version = "0.1.0"
+description = "四诊数据标注与AI模型训练系统 - backend (FastAPI + PyTorch + SQLAlchemy)"
+requires-python = ">=3.10"

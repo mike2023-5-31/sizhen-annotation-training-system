@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+python-multipart
+torch
+torchvision
+onnx
+onnxruntime
+scikit-learn
+pillow
+numpy
+pyyaml
+websockets
+pytest
+httpx

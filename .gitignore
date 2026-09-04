@@ -1,0 +1,25 @@
+# --- Data (real datasets / weights / exports never committed) ---
+data/datasets/
+data/models/
+data/exports/
+data/uploads/
+
+# --- Python ---
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- Node ---
+node_modules/
+dist/
+
+# --- Model artifacts ---
+*.pth
+*.onnx
+
+# --- Database ---
+*.sqlite
+
+# --- Env / secrets ---
+.env
