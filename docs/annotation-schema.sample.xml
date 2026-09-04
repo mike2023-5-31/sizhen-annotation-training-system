@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<annotation>
+  <folder>舌诊数据集A</folder>
+  <filename>image_0001.jpg</filename>
+  <path>subdir/image_0001.jpg</path>
+  <size><width>640</width><height>480</height><depth>3</depth></size>
+  <quality>合格</quality>
+  <labels>
+    <label><category>舌</category><name>舌苔黄</name><confidence>1.0</confidence></label>
+    <label><category>面</category><name>面色红润</name><confidence>1.0</confidence></label>
+    <label><category>脉</category><name>浮</name><confidence>1.0</confidence></label>
+    <label><category>声音</category><name>清晰</name><confidence>1.0</confidence></label>
+  </labels>
+</annotation>
