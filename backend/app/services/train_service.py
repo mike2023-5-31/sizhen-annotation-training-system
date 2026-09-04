@@ -1,8 +1,14 @@
-"""训练服务（T13，需求 6.6/6.8/6.9/6.10/6.11/6.14）。
+"""训练服务（T13，需求 6.6/6.8/6.9/6.10/6.11/6.14；T14 扩展：监控推送 + 评估）。
 
 - ``TrainManager``：线程安全的训练任务管理器（指标缓冲 + 任务状态），
   ``start_training(config)`` / ``resume_training(checkpoint_path, config)``
   后台线程执行、立即返回 job id（REQ-6.12-3 后台训练不阻塞）。
+- T14 监控（REQ-6.12）：每轮指标追加时置位 ``threading.Event``
+  （``metrics_event``）唤醒 WebSocket 推送；训练线程只 ``set()`` 从不阻塞发送；
+  ``get_metrics(job_id=None)`` 返回指标缓冲快照（轮询兜底 / 刷新重建曲线）。
+- T14 评估（REQ-6.13）：训练完成后对**验证集**做一次前向，保留 softmax 概率，
+  逐类别（舌/面/脉/声音）计算子标签混淆矩阵 + one-vs-rest micro 平均 ROC/AUC
+  （``compute_eval(job_id)``，缓存于 job；无验证集 → 空 dict 不报错）。
 - 数据管线：torch Dataset 读取每张 ``Record`` 图片 + 同名 XML（``xml_io.read_xml``），
   标签映射为各分类头类别下标（未标注 category → 下标 0 =「正常/无」，锁定决策 1）；
   训练集应用所选增强（RandomHorizontalFlip / RandomRotation / ColorJitter /
@@ -391,6 +397,22 @@ def _prepare_data(dataset_ids: list[int]) -> list[tuple[str, list[int]]]:
     return items
 
 
+def _split_train_val(
+    items: list[tuple[str, list[int]]], val_split: float, seed: int
+) -> tuple[list[int], set[int]]:
+    """固定 seed 划分 train/val 下标（首训与续训一致，best/评估判据可比）。"""
+    rng = random.Random(seed)
+    indices = list(range(len(items)))
+    rng.shuffle(indices)
+    n_val = int(len(items) * val_split) if val_split else 0
+    val_set = set(indices[:n_val])
+    train_set = [i for i in indices if i not in val_set]
+    if len(items) >= 2 and not train_set:
+        train_set = [indices[-1]]
+        val_set = set(indices[:-1])
+    return train_set, val_set
+
+
 # ---------------------------------------------------------------------------
 # 优化器 / 调度器（REQ-6.9-4）
 # ---------------------------------------------------------------------------
@@ -559,6 +581,14 @@ class TrainManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._jobs: dict[str, dict[str, Any]] = {}
+        # T14：指标/状态变化推送信号。训练线程只 set()（非阻塞），
+        # WS 连接在各自事件循环侧 wait() + clear()（见 routers/training.py）。
+        self._metrics_event = threading.Event()
+
+    @property
+    def metrics_event(self) -> threading.Event:
+        """指标追加/状态变化的推送信号（T14，供 WS 连接等待唤醒）。"""
+        return self._metrics_event
 
     # -- 启动入口 ----------------------------------------------------------
 
@@ -637,6 +667,17 @@ class TrainManager:
         with self._lock:
             return [self._public_view(j) for j in self._jobs.values()]
 
+    def get_metrics(self, job_id: Optional[str] = None) -> dict[str, Any]:
+        """指标缓冲快照（T14）：单个任务或全部任务的 status + metrics。
+
+        供 ``GET /training/status`` 轮询兜底与 WS 连接初始快照共用
+        （REQ-6.12-4 刷新后按已记录指标重建曲线）。
+        """
+        if job_id is not None:
+            job = self.get_job(job_id)
+            return {"jobs": [job] if job else []}
+        return {"jobs": self.list_jobs()}
+
     def stop(self, job_id: str) -> bool:
         """请求停止：置 stop 事件，训练线程在下一 batch/epoch 边界退出并存档。"""
         with self._lock:
@@ -655,6 +696,38 @@ class TrainManager:
             thread.join(timeout)
         view = self.get_job(job_id)
         return view if view is not None else {}
+
+    def compute_eval(self, job_id: str) -> Optional[dict[str, Any]]:
+        """评估结果（T14，REQ-6.13）：验证集混淆矩阵 + one-vs-rest ROC/AUC。
+
+        训练完成时已在后台线程算好并缓存于 job；缓存缺失（如任务被停止/跨进程
+        查询）且 latest 存档可用时，从存档重建模型对验证集重新计算一次。
+
+        Returns:
+            ``{"confusion": {类别: [[..]]}, "roc": {类别: {"fpr", "tpr", "auc"}}}``；
+            无验证集 → 两个空 dict；任务不存在或仍在运行/评估不可用 → None。
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            cached = job.get("eval")
+            if cached is not None:
+                return copy.deepcopy(cached)
+            status = job["status"]
+            cfg = copy.deepcopy(job["config"])
+            items = job.get("_items")
+            checkpoint_path = job.get("checkpoint_latest")
+        if status in {"created", "running"}:
+            return None
+        if not checkpoint_path or not items:
+            return {"confusion": {}, "roc": {}}
+        try:
+            result = _eval_from_checkpoint(cfg, items, str(checkpoint_path))
+        except Exception:
+            return {"confusion": {}, "roc": {}}
+        self._update(job, eval=result)
+        return copy.deepcopy(result)
 
     def _public_view(self, job: dict[str, Any]) -> dict[str, Any]:
         view = {
@@ -684,11 +757,14 @@ class TrainManager:
     def _update(self, job: dict[str, Any], **fields: Any) -> None:
         with self._lock:
             job.update(fields)
+        if "status" in fields or "eval" in fields:
+            self._metrics_event.set()
 
     def _append_metric(self, job: dict[str, Any], metric: dict[str, Any]) -> None:
         with self._lock:
             job["metrics"].append(copy.deepcopy(metric))
             job["current_epoch"] = metric["epoch"]
+        self._metrics_event.set()
 
     # -- 训练主循环 ---------------------------------------------------------
 
@@ -754,15 +830,7 @@ class TrainManager:
         )
 
         # 划分 train/val（seed 固定 → 续训与首训划分一致，best 判据可比）
-        rng = random.Random(cfg["seed"])
-        indices = list(range(len(items)))
-        rng.shuffle(indices)
-        n_val = int(len(items) * cfg["val_split"]) if cfg["val_split"] else 0
-        val_set = set(indices[:n_val])
-        train_set = [i for i in indices if i not in val_set]
-        if len(items) >= 2 and not train_set:
-            train_set = [indices[-1]]
-            val_set = set(indices[:-1])
+        train_set, val_set = _split_train_val(items, cfg["val_split"], cfg["seed"])
 
         train_loader = DataLoader(
             _AnnotationDataset(
@@ -849,7 +917,25 @@ class TrainManager:
                 pass
             self._update(job, status="stopped", finished_at=_utcnow_iso())
         else:
-            self._update(job, status="completed", finished_at=_utcnow_iso())
+            # T14（REQ-6.13）：完成后对验证集计算混淆矩阵 + one-vs-rest ROC，
+            # 与状态更新同锁原子落盘；无验证集 → 空 dict 不报错（REQ-6.13-4）。
+            eval_result: dict[str, Any] = {"confusion": {}, "roc": {}}
+            if val_loader is not None:
+                try:
+                    collected = _collect_val_probs(
+                        model, val_loader, device, use_amp, category_names
+                    )
+                    eval_result = _compute_eval_from_probs(
+                        collected, category_names, list(num_classes)
+                    )
+                except Exception:
+                    eval_result = {"confusion": {}, "roc": {}}
+            self._update(
+                job,
+                eval=eval_result,
+                status="completed",
+                finished_at=_utcnow_iso(),
+            )
 
     # -- epoch 级训练/评估 --------------------------------------------------
 
@@ -949,6 +1035,124 @@ def _mean_macro_acc(
             per_head.append(0.0)
     mean = float(sum(per_head) / len(per_head)) if per_head else 0.0
     return mean, per_head
+
+
+# ---------------------------------------------------------------------------
+# 评估计算（T14，需求 6.13：验证集混淆矩阵 + one-vs-rest ROC）
+# ---------------------------------------------------------------------------
+
+
+def _collect_val_probs(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    use_amp: bool,
+    category_names: list[str],
+) -> dict[str, tuple[Any, Any]]:
+    """验证集前向一遍，收集各头 softmax 概率 + 真值下标（REQ-6.13-3 保留概率）。
+
+    Returns:
+        ``{类别: (probs ndarray (N, n_cls), targets ndarray (N,))}``。
+    """
+    model.eval()
+    prob_acc: dict[str, list[torch.Tensor]] = {n: [] for n in category_names}
+    targ_acc: dict[str, list[torch.Tensor]] = {n: [] for n in category_names}
+    with torch.no_grad():
+        for images, targets in loader:
+            images = images.to(device)
+            targets = targets.to(device)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                outs = model(images)
+            for i, name in enumerate(category_names):
+                prob_acc[name].append(
+                    F.softmax(outs[name], dim=1).detach().float().cpu()
+                )
+                targ_acc[name].append(targets[:, i].cpu())
+    return {
+        name: (
+            torch.cat(prob_acc[name]).numpy() if prob_acc[name] else None,
+            torch.cat(targ_acc[name]).numpy() if targ_acc[name] else None,
+        )
+        for name in category_names
+    }
+
+
+def _one_vs_rest_roc(
+    y_true: Any, probs: Any, n_classes: int
+) -> tuple[list[float], list[float], float]:
+    """单类别多分类头的 one-vs-rest micro 平均 ROC（REQ-6.13-2）。
+
+    子标签二值化（label_binarize）后与 softmax 概率按列展平，得到该类别一条
+    聚合 ROC 曲线（= 各子标签 one-vs-rest 的 micro 平均）与 AUC 标量。
+    """
+    from sklearn.metrics import auc, roc_curve
+    from sklearn.preprocessing import label_binarize
+
+    y_bin = label_binarize(y_true, classes=list(range(n_classes)))
+    if y_bin.ndim == 1:
+        y_bin = y_bin.reshape(-1, 1)
+    fpr, tpr, _ = roc_curve(y_bin.ravel(), probs.reshape(-1).ravel())
+    try:
+        auc_val = float(auc(fpr, tpr))
+    except Exception:
+        auc_val = 0.0
+    return [float(x) for x in fpr], [float(x) for x in tpr], auc_val
+
+
+def _compute_eval_from_probs(
+    collected: dict[str, tuple[Any, Any]],
+    category_names: list[str],
+    num_classes: list[int],
+) -> dict[str, Any]:
+    """逐类别计算子标签混淆矩阵 + ROC/AUC（REQ-6.13-1/2）。
+
+    Returns:
+        ``{"confusion": {类别: [[int,...]...]}, "roc": {类别: {"fpr", "tpr", "auc"}}}``；
+        某类别无验证样本时该类别缺席（不伪造数据）。
+    """
+    from sklearn.metrics import confusion_matrix
+
+    confusion: dict[str, list[list[int]]] = {}
+    roc: dict[str, dict[str, Any]] = {}
+    for i, name in enumerate(category_names):
+        probs, targets = collected.get(name, (None, None))
+        if probs is None or targets is None or targets.size == 0:
+            continue
+        n_cls = int(num_classes[i])
+        matrix = confusion_matrix(targets, probs.argmax(axis=1), labels=list(range(n_cls)))
+        confusion[name] = [[int(v) for v in row] for row in matrix.tolist()]
+        fpr, tpr, auc_val = _one_vs_rest_roc(targets, probs, n_cls)
+        roc[name] = {"fpr": fpr, "tpr": tpr, "auc": auc_val}
+    return {"confusion": confusion, "roc": roc}
+
+
+def _eval_from_checkpoint(
+    cfg: dict[str, Any], items: list[tuple[str, list[int]]], checkpoint_path: str
+) -> dict[str, Any]:
+    """从 latest 存档重建模型，对验证集计算评估（缓存缺失时的兜底路径）。
+
+    与训练线程使用同一 ``_split_train_val`` 划分，保证评估范围一致。
+    """
+    payload = _load_resume_payload(checkpoint_path, cfg)
+    device, _n_gpus = resolve_device()
+    num_classes = num_classes_per_head()
+    model = factory.build_model(
+        payload["architecture"], list(num_classes), dropout=float(cfg.get("dropout", 0.0))
+    )
+    model.load_state_dict(payload["model_state"])
+    model = model.to(device)
+
+    _, val_set = _split_train_val(items, cfg["val_split"], cfg["seed"])
+    if not val_set:
+        return {"confusion": {}, "roc": {}}
+    loader = DataLoader(
+        _AnnotationDataset([items[i] for i in sorted(val_set)], _build_val_transform()),
+        batch_size=cfg["batch_size"],
+        shuffle=False,
+        num_workers=0,
+    )
+    collected = _collect_val_probs(model, loader, device, False, _CATEGORY_NAMES)
+    return _compute_eval_from_probs(collected, _CATEGORY_NAMES, list(num_classes))
 
 
 # ---------------------------------------------------------------------------
