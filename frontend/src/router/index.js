@@ -23,6 +23,11 @@ const router = createRouter({
       name: 'annotate',
       component: () => import('../views/Annotate.vue'),
     },
+    {
+      path: '/infer',
+      name: 'infer',
+      component: () => import('../views/Infer.vue'),
+    },
   ],
 })
 
