@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import config
-from app.routers import annotations, datasets, images
+from app.routers import annotations, datasets, images, inference
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -60,6 +60,9 @@ api_router.include_router(images.router)
 
 # 业务路由（标注标签树/写回/硬删除，T10）
 api_router.include_router(annotations.router)
+
+# 业务路由（推理：模型列表/批量预测/预标注 XML，T17）
+api_router.include_router(inference.router)
 
 # 业务路由（ZIP 导入，T7）：模块文件名 import.py 与 Python 关键字同名，
 # 无法写 `from app.routers import import`，改经 importlib 加载。
