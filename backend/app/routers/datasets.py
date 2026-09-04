@@ -1,15 +1,19 @@
-"""数据集 CRUD 路由（T6，需求 6.1）。
+"""数据集 CRUD 路由（T6，需求 6.1）+ 内置库拉取（T8，需求 6.2b）。
 
 前缀 ``/datasets``，挂载于 ``main.api_router``（整体 ``/api`` 前缀）后对外为
-``/api/datasets``。T7/T8 的 ZIP 导入 / 内置库拉取将追加到本 router（plan 约定）。
+``/api/datasets``。T7 的 ZIP 导入将追加到本 router（plan 约定）。
 
 错误映射：
 - ``ValueError``（目标不存在）→ 404；
-- ``IntegrityError``（name 唯一约束冲突）→ 409。
+- ``IntegrityError``（name 唯一约束冲突）→ 409；
+- quality 非法 → 400。
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 
 from app.models.orm import Dataset
@@ -53,3 +57,39 @@ def delete_dataset(dataset_id: int) -> dict[str, bool]:
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {"ok": True}
+
+
+class PullRecordsIn(BaseModel):
+    """POST /api/datasets/pull 请求体（T8，需求 6.2b）。"""
+
+    target_dataset_id: int
+    start_time: datetime
+    end_time: datetime
+    quality: str = "全部"  # "合格" | "全部"；非法值 → 400
+
+
+class PullRecordsOut(BaseModel):
+    """拉取结果：实际复制进目标数据集（并落 Record）的条数。"""
+
+    pulled: int
+
+
+@router.post("/pull", response_model=PullRecordsOut)
+def pull_records(payload: PullRecordsIn) -> dict[str, int]:
+    """内置库按时间范围拉取 + 质量过滤（需求 6.2b）。
+
+    源为目标数据集之外的全部 Record 行（内置库，与普通数据集共用 records 表），
+    复制图片+同名 XML 进目标数据集目录并镜像建 Record；源文件只读不动。
+    目标不存在 → 404，quality 非法 → 400。
+    """
+    if payload.quality not in ("合格", "全部"):
+        raise HTTPException(status_code=400, detail="quality 仅支持「合格」或「全部」")
+    try:
+        return dataset_service.pull_records(
+            target_dataset_id=payload.target_dataset_id,
+            start_time=payload.start_time,
+            end_time=payload.end_time,
+            quality=payload.quality,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
