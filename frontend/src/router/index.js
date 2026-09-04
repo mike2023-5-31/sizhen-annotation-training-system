@@ -38,6 +38,11 @@ const router = createRouter({
       name: 'evaluate',
       component: () => import('../views/Evaluate.vue'),
     },
+    {
+      path: '/onnx',
+      name: 'onnx',
+      component: () => import('../views/Onnx.vue'),
+    },
   ],
 })
 
