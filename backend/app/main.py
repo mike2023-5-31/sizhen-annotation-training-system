@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import importlib
 import logging
 
 from fastapi import APIRouter, FastAPI, Request
@@ -53,6 +54,10 @@ def health() -> dict[str, str]:
 
 # 业务路由（数据集 CRUD，T6）
 api_router.include_router(datasets.router)
+
+# 业务路由（ZIP 导入，T7）：模块文件名 import.py 与 Python 关键字同名，
+# 无法写 `from app.routers import import`，改经 importlib 加载。
+api_router.include_router(importlib.import_module("app.routers.import").router)
 
 
 app.include_router(api_router)
