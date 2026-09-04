@@ -132,7 +132,7 @@ const jobsLoading = ref(false)
 const jobId = ref(null)
 const loading = ref(false)
 
-const labelCategories = ref([]) // GET /annotations/labels → [{name, labels}]
+const labelCategories = ref([]) // GET /labels → [{name, labels}]
 const evalResult = ref(null) // GET /training/eval/{job_id} → {confusion, roc}
 
 const categories = computed(() => labelCategories.value)
@@ -186,7 +186,7 @@ async function loadJobs() {
 
 async function loadLabels() {
   try {
-    const { data } = await api.get('/annotations/labels')
+    const { data } = await api.get('/labels')
     labelCategories.value = data.categories || []
   } catch {
     labelCategories.value = []

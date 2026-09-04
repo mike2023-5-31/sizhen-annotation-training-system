@@ -479,7 +479,11 @@ function connectWs() {
   }
   ws.onmessage = (event) => {
     try {
-      handleFrame(JSON.parse(event.data))
+      // 后端 json.dumps 默认允许 NaN（无验证集任务 val_loss=NaN），浏览器严格
+      // JSON.parse 会抛错导致快照/指标帧被静默丢弃；前端先清洗再解析（NaN→null，
+      // 曲线端 connectNulls 已兼容 null 断点）
+      const payload = String(event.data).replace(/(?:NaN|-?Infinity)/g, 'null')
+      handleFrame(JSON.parse(payload))
     } catch {
       // 忽略无法解析的帧
     }
@@ -520,13 +524,37 @@ function stopPolling() {
 // ---------------------------------------------------------------------------
 // ECharts 曲线渲染（REQ-6.12-1/2 每 epoch 追加；REQ-6.12-4 刷新重建）
 // ---------------------------------------------------------------------------
+function ensureCharts() {
+  if (!lossEl.value || !accEl.value) return
+  // v-if 切换任务时图表容器会被销毁重建，实例仍指向已脱离文档的旧 DOM；
+  // 检测到容器被替换则先销毁旧实例再于新容器上重新初始化
+  const lossStale = !!lossChart && lossChart.getDom() !== lossEl.value
+  const accStale = !!accChart && accChart.getDom() !== accEl.value
+  if (lossChart && accChart && !lossStale && !accStale) return
+  if (lossStale) lossChart.dispose()
+  if (accStale) accChart.dispose()
+  lossChart = echarts.init(lossEl.value)
+  accChart = echarts.init(accEl.value)
+  // 供 Playwright/调试读取实时数据点数
+  window.__sizhenCharts = {
+    loss: lossChart,
+    acc: accChart,
+  }
+}
+
 function updateCharts(job) {
+  ensureCharts()
+  if (!lossChart || !accChart) return
   const metrics = job?.metrics || []
   const epochsArr = metrics.map((m) => m.epoch)
   const trainLoss = metrics.map((m) => m.train_loss)
-  const valLoss = metrics.map((m) => m.val_loss)
+  const valLoss = metrics.map((m) =>
+    Number.isFinite(m.val_loss) ? m.val_loss : null,
+  )
   const trainAcc = metrics.map((m) => Number(m.train_acc) * 100)
-  const valAcc = metrics.map((m) => Number(m.val_acc) * 100)
+  const valAcc = metrics.map((m) =>
+    Number.isFinite(Number(m.val_acc)) ? Number(m.val_acc) * 100 : null,
+  )
 
   if (lossChart) {
     lossChart.setOption({
@@ -589,9 +617,11 @@ function onResize() {
   accChart?.resize()
 }
 
-watch(selectedJobId, () => {
-  const job = selectedJob.value
-  if (job) updateCharts(job)
+watch(selectedJob, async (job) => {
+  if (!job) return
+  await nextTick()
+  ensureCharts()
+  updateCharts(job)
 })
 
 // ---------------------------------------------------------------------------
@@ -601,13 +631,7 @@ onMounted(async () => {
   loadDatasets()
   loadCheckpoints()
   await nextTick()
-  lossChart = echarts.init(lossEl.value)
-  accChart = echarts.init(accEl.value)
-  // 供 Playwright/调试读取实时数据点数
-  window.__sizhenCharts = {
-    loss: lossChart,
-    acc: accChart,
-  }
+  ensureCharts()
   window.addEventListener('resize', onResize)
 
   pollStatus() // 页面刷新后按已记录指标重建曲线（REQ-6.12-4）
