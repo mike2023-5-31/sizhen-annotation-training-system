@@ -28,6 +28,16 @@ const router = createRouter({
       name: 'infer',
       component: () => import('../views/Infer.vue'),
     },
+    {
+      path: '/train',
+      name: 'train',
+      component: () => import('../views/Train.vue'),
+    },
+    {
+      path: '/evaluate',
+      name: 'evaluate',
+      component: () => import('../views/Evaluate.vue'),
+    },
   ],
 })
 
