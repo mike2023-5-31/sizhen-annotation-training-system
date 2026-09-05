@@ -1,16 +1,21 @@
 <template>
-  <div class="onnx-page" style="padding: 24px">
+  <div class="onnx-page">
+    <header class="page-head">
+      <h1 class="page-title">模型转换</h1>
+      <p class="page-sub">
+        将 PyTorch checkpoint 一键导出为 ONNX，并自动逐分类头对比推理精度（阈值 1e-3）
+      </p>
+    </header>
+
     <el-card>
       <template #header>
         <div class="toolbar">
-          <span class="title">ONNX 转换</span>
-          <span style="flex: 1"></span>
           <el-select
             v-model="modelPath"
             placeholder="选择模型"
             clearable
             :loading="modelsLoading"
-            style="width: 300px; margin-right: 12px"
+            style="width: 300px"
           >
             <el-option v-for="m in models" :key="m" :label="m" :value="m" />
           </el-select>
@@ -30,6 +35,7 @@
           >
             下载 .onnx
           </el-button>
+          <span class="toolbar-spacer"></span>
           <el-button @click="loadModels">刷新</el-button>
         </div>
       </template>
@@ -63,28 +69,42 @@
         style="margin-bottom: 12px"
       />
 
-      <el-table
-        v-if="results.length > 0"
-        :data="results"
-        border
-        stripe
-        class="compare-table"
-      >
-        <el-table-column prop="category" label="分类头" width="160" />
-        <el-table-column label="最大绝对误差 (max_abs_diff)" min-width="220">
-          <template #default="{ row }">{{ row.max_abs_diff.toExponential(6) }}</template>
-        </el-table-column>
-        <el-table-column label="阈值" width="120">
-          <template #default>1e-3</template>
-        </el-table-column>
-        <el-table-column label="结果" width="120" align="center">
-          <template #default="{ row }">
-            <el-tag :type="row.pass ? 'success' : 'danger'" size="small">
-              {{ row.pass ? 'PASS' : 'FAIL' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-      </el-table>
+      <template v-if="results.length > 0">
+        <div v-if="onnxName" class="onnx-strip">
+          <span class="onnx-strip-label">ONNX 产物</span>
+          <span class="onnx-strip-name">{{ onnxName }}</span>
+          <span class="onnx-strip-spacer"></span>
+          <el-button
+            size="small"
+            type="success"
+            :disabled="!overallPass"
+            @click="onDownload"
+          >
+            下载 .onnx
+          </el-button>
+        </div>
+
+        <el-table :data="results" border stripe class="compare-table">
+          <el-table-column prop="category" label="分类头" width="160" />
+          <el-table-column label="最大绝对误差 (max_abs_diff)" min-width="220">
+            <template #default="{ row }">
+              <span class="diff-cell">{{ row.max_abs_diff.toExponential(6) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="阈值" width="120">
+            <template #default>
+              <span class="diff-cell">1e-3</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="结果" width="120" align="center">
+            <template #default="{ row }">
+              <el-tag :type="row.pass ? 'success' : 'danger'" size="small">
+                {{ row.pass ? 'PASS' : 'FAIL' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
 
       <el-empty
         v-if="!converting && results.length === 0"
@@ -198,17 +218,77 @@ onMounted(loadModels)
 </script>
 
 <style scoped>
+/* ---- 页头 ---- */
+.page-head {
+  margin-bottom: var(--ts-space-5);
+}
+
+.page-title {
+  margin: 0 0 var(--ts-space-1);
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--ts-text-primary);
+}
+
+.page-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ts-text-secondary);
+}
+
 .toolbar {
   display: flex;
   align-items: center;
+  gap: var(--ts-space-3);
 }
 
-.title {
-  font-size: 1.05rem;
+.toolbar-spacer {
+  flex: 1;
+}
+
+/* ---- ONNX 产物信息条 ---- */
+.onnx-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-2);
+  margin-bottom: var(--ts-space-3);
+  padding: var(--ts-space-2) var(--ts-space-3);
+  background: var(--ts-surface-raised);
+  border: 1px solid var(--ts-border-subtle);
+  border-radius: var(--ts-radius-sm);
+}
+
+.onnx-strip-label {
+  font-size: 12px;
   font-weight: 600;
+  color: var(--ts-text-tertiary);
 }
 
+.onnx-strip-name {
+  font-size: 13px;
+  color: var(--ts-text-primary);
+  font-family: var(--ts-font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.onnx-strip-spacer {
+  flex: 1;
+}
+
+/* ---- 逐头差异 ---- */
 .compare-table {
-  margin-top: 4px;
+  margin-top: var(--ts-space-1);
+}
+
+.diff-cell {
+  font-family: var(--ts-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--ts-text-secondary);
 }
 </style>

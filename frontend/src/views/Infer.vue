@@ -1,16 +1,21 @@
 <template>
-  <div class="infer-page" style="padding: 24px">
+  <div class="infer-page">
+    <header class="page-head">
+      <h1 class="page-title">批量推理</h1>
+      <p class="page-sub">
+        用训练好的模型对数据集整体预测，输出每张图片的四诊分类结果，并可生成预标注 XML
+      </p>
+    </header>
+
     <el-card>
       <template #header>
         <div class="toolbar">
-          <span class="title">批量推理</span>
-          <span style="flex: 1"></span>
           <el-select
             v-model="modelPath"
             placeholder="选择模型"
             clearable
             :loading="modelsLoading"
-            style="width: 260px; margin-right: 12px"
+            style="width: 260px"
           >
             <el-option v-for="m in models" :key="m" :label="m" :value="m" />
           </el-select>
@@ -19,7 +24,7 @@
             placeholder="选择数据集"
             clearable
             :loading="datasetsLoading"
-            style="width: 220px; margin-right: 12px"
+            style="width: 220px"
           >
             <el-option
               v-for="ds in datasets"
@@ -44,6 +49,7 @@
           >
             生成预标注 XML
           </el-button>
+          <span class="toolbar-spacer"></span>
           <el-button @click="loadAll">刷新</el-button>
         </div>
       </template>
@@ -244,27 +250,54 @@ onMounted(loadAll)
 </script>
 
 <style scoped>
+/* ---- 页头 ---- */
+.page-head {
+  margin-bottom: var(--ts-space-5);
+}
+
+.page-title {
+  margin: 0 0 var(--ts-space-1);
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--ts-text-primary);
+}
+
+.page-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ts-text-secondary);
+}
+
 .toolbar {
   display: flex;
   align-items: center;
+  gap: var(--ts-space-3);
 }
 
-.title {
-  font-size: 1.05rem;
-  font-weight: 600;
+.toolbar-spacer {
+  flex: 1;
 }
 
-.cat-tag {
-  margin-right: 8px;
+/* ---- 预测结果 ---- */
+.cat-tag.el-tag {
+  margin: 0 var(--ts-space-2) 0 0;
+  background: var(--ts-jade-50);
+  border-color: var(--ts-jade-200);
+  color: var(--ts-jade-800);
 }
 
 .cat-pct {
-  color: #606266;
-  font-size: 0.9rem;
+  color: var(--ts-text-secondary);
+  font-size: 13px;
   white-space: nowrap;
+  font-family: var(--ts-font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .cell-empty {
-  color: #c0c4cc;
+  color: var(--ts-text-disabled);
 }
 </style>

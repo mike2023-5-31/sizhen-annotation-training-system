@@ -1,104 +1,116 @@
 <template>
-  <div class="annotate" style="padding: 24px">
+  <div class="annotate">
     <el-empty
       v-if="!datasetId"
       description="请从数据集管理页进入标注页（URL 需携带 ?dataset=数据集ID）"
     />
-    <el-card v-else>
-      <template #header>
-        <div class="toolbar">
-          <span class="title">图片标注（数据集 #{{ datasetId }}）</span>
-          <span style="flex: 1"></span>
-          <el-input
-            v-model="query"
-            placeholder="按文件名搜索"
-            clearable
-            style="width: 260px; margin-right: 8px"
-            @keyup.enter="onSearch"
-            @clear="onSearch"
-          />
-          <el-button type="primary" @click="onSearch">搜索</el-button>
-          <el-button @click="onReset">重置</el-button>
+    <template v-else>
+      <header class="page-head">
+        <div class="page-title-row">
+          <h1 class="page-title">图片标注</h1>
+          <span class="dataset-chip">数据集 #{{ datasetId }}</span>
         </div>
-      </template>
+        <p class="page-sub">
+          逐图勾选四诊标签（每类单选）· ←/→ 翻图 · 1–4 定位类别 · Q 质量 · S 保存
+        </p>
+      </header>
 
-      <div v-loading="loading" style="min-height: 200px">
-        <el-empty
-          v-if="images.length === 0 && !loading"
-          :description="hasSearched ? '无匹配图片' : '该数据集暂无图片'"
-        />
-        <div v-else-if="images.length > 0" class="browse">
-          <div class="viewer">
-            <img :src="imageSrc" :alt="currentImage" class="main-image" />
-            <div class="controls">
-              <el-button :disabled="currentIndex <= 0" @click="prev">上一张</el-button>
-              <el-slider
-                v-model="currentIndex"
-                :min="0"
-                :max="images.length - 1"
-                :show-tooltip="false"
-                class="progress"
-              />
-              <el-button :disabled="currentIndex >= images.length - 1" @click="next">
-                下一张
-              </el-button>
-            </div>
-            <div class="position">
-              <span>{{ currentIndex + 1 }} / {{ images.length }}</span>
-              <span class="filename" :title="currentImage">{{ currentImage }}</span>
-            </div>
+      <el-card>
+        <template #header>
+          <div class="toolbar">
+            <el-input
+              v-model="query"
+              placeholder="按文件名搜索"
+              clearable
+              style="width: 260px"
+              @keyup.enter="onSearch"
+              @clear="onSearch"
+            />
+            <el-button type="primary" @click="onSearch">搜索</el-button>
+            <el-button @click="onReset">重置</el-button>
           </div>
+        </template>
 
-          <div id="annotation-panel" class="panel">
-            <div v-if="!currentImage" class="panel-empty">
-              <el-empty description="暂无图片可标注" :image-size="60" />
-            </div>
-            <template v-else>
-              <div class="panel-head">
-                <span class="panel-title">标注面板</span>
-                <el-button
-                  size="small"
-                  :type="quality === '合格' ? 'success' : 'default'"
-                  @click="toggleQuality"
-                >
-                  质量：{{ qualityText }}
+        <div v-loading="loading" style="min-height: 200px">
+          <el-empty
+            v-if="images.length === 0 && !loading"
+            :description="hasSearched ? '无匹配图片' : '该数据集暂无图片'"
+          />
+          <div v-else-if="images.length > 0" class="browse">
+            <div class="viewer">
+              <div class="image-well">
+                <img :src="imageSrc" :alt="currentImage" class="main-image" />
+              </div>
+              <div class="controls">
+                <el-button :disabled="currentIndex <= 0" @click="prev">上一张</el-button>
+                <el-slider
+                  v-model="currentIndex"
+                  :min="0"
+                  :max="images.length - 1"
+                  :show-tooltip="false"
+                  class="progress"
+                />
+                <el-button :disabled="currentIndex >= images.length - 1" @click="next">
+                  下一张
                 </el-button>
               </div>
-              <div class="hint">1–4 定位类别 · ←/→ 翻图 · Q 质量 · S 保存</div>
-              <el-tree
-                ref="treeRef"
-                class="label-tree"
-                :data="treeData"
-                node-key="key"
-                show-checkbox
-                check-strictly
-                default-expand-all
-                :expand-on-click-node="false"
-                @check="onCheck"
-                @node-click="onNodeClick"
-              />
-              <div v-if="selectedSummary.length" class="selected-row">
-                <el-tag
-                  v-for="s in selectedSummary"
-                  :key="s.category"
-                  size="small"
-                  type="info"
-                  class="sel-tag"
-                >
-                  {{ s.category }}：{{ s.name }}
-                </el-tag>
+              <div class="position">
+                <span class="pos-index">{{ currentIndex + 1 }} / {{ images.length }}</span>
+                <span class="filename" :title="currentImage">{{ currentImage }}</span>
               </div>
-              <div class="panel-foot">
-                <span class="save-state" :class="saveState">{{ saveStateText }}</span>
-                <span style="flex: 1"></span>
-                <el-button size="small" @click="manualSave">保存</el-button>
-                <el-button size="small" type="danger" @click="onDelete">删除</el-button>
+            </div>
+
+            <div id="annotation-panel" class="panel">
+              <div v-if="!currentImage" class="panel-empty">
+                <el-empty description="暂无图片可标注" :image-size="60" />
               </div>
-            </template>
+              <template v-else>
+                <div class="panel-head">
+                  <span class="panel-title">标注面板</span>
+                  <el-button
+                    size="small"
+                    :type="quality === '合格' ? 'success' : 'default'"
+                    @click="toggleQuality"
+                  >
+                    质量：{{ qualityText }}
+                  </el-button>
+                </div>
+                <div class="hint">1–4 定位类别 · ←/→ 翻图 · Q 质量 · S 保存</div>
+                <el-tree
+                  ref="treeRef"
+                  class="label-tree"
+                  :data="treeData"
+                  node-key="key"
+                  show-checkbox
+                  check-strictly
+                  default-expand-all
+                  :expand-on-click-node="false"
+                  @check="onCheck"
+                  @node-click="onNodeClick"
+                />
+                <div v-if="selectedSummary.length" class="selected-row">
+                  <el-tag
+                    v-for="s in selectedSummary"
+                    :key="s.category"
+                    size="small"
+                    type="info"
+                    class="sel-tag"
+                  >
+                    {{ s.category }}：{{ s.name }}
+                  </el-tag>
+                </div>
+                <div class="panel-foot">
+                  <span class="save-state" :class="saveState">{{ saveStateText }}</span>
+                  <span class="panel-foot-spacer"></span>
+                  <el-button size="small" type="primary" @click="manualSave">保存</el-button>
+                  <el-button size="small" type="danger" @click="onDelete">删除</el-button>
+                </div>
+              </template>
+            </div>
           </div>
         </div>
-      </div>
-    </el-card>
+      </el-card>
+    </template>
   </div>
 </template>
 
@@ -484,113 +496,240 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* ---- 页头 ---- */
+.page-head {
+  margin-bottom: var(--ts-space-5);
+}
+
+.page-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-3);
+}
+
+.page-title {
+  margin: 0 0 var(--ts-space-1);
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--ts-text-primary);
+}
+
+.dataset-chip {
+  padding: 2px 10px;
+  border-radius: var(--ts-radius-pill);
+  background: var(--ts-jade-100);
+  color: var(--ts-jade-800);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.page-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ts-text-secondary);
+}
+
 .toolbar {
   display: flex;
   align-items: center;
+  gap: var(--ts-space-3);
 }
-.title {
-  font-weight: 600;
-}
+
+/* ---- 浏览布局：画布卡 + 标签树卡 ---- */
 .browse {
   display: flex;
-  gap: 16px;
+  gap: var(--ts-space-4);
+  align-items: stretch;
 }
+
 .viewer {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--ts-space-4);
+  background: var(--ts-surface-base);
+  border: 1px solid var(--ts-border-subtle);
+  border-radius: var(--ts-radius-md);
+  box-shadow: var(--ts-shadow-subtle);
 }
+
+.image-well {
+  background: var(--ts-surface-sunken);
+  border-radius: var(--ts-radius-sm);
+  padding: var(--ts-space-3);
+}
+
 .main-image {
+  display: block;
   width: 100%;
-  max-height: 70vh;
+  max-height: 66vh;
   object-fit: contain;
-  background: #f5f5f5;
-  border-radius: 4px;
+  border-radius: var(--ts-radius-xs);
 }
+
 .controls {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-top: 12px;
+  gap: var(--ts-space-3);
+  margin-top: var(--ts-space-3);
 }
+
 .progress {
   flex: 1;
 }
+
 .position {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 4px;
-  font-size: 14px;
-  color: #606266;
+  gap: var(--ts-space-3);
+  margin-top: var(--ts-space-2);
+  font-size: 13px;
+  color: var(--ts-text-secondary);
 }
+
+.pos-index {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
 .filename {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--ts-text-tertiary);
 }
+
+/* ---- 标注面板卡 ---- */
 .panel {
   width: 320px;
   flex-shrink: 0;
-  border-left: 1px solid #ebeef5;
-  padding-left: 16px;
-  min-height: 400px;
   display: flex;
   flex-direction: column;
+  padding: var(--ts-space-4);
+  background: var(--ts-surface-base);
+  border: 1px solid var(--ts-border-subtle);
+  border-radius: var(--ts-radius-md);
+  box-shadow: var(--ts-shadow-subtle);
 }
+
 .panel-empty {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
 }
+
 .panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 4px;
+  gap: var(--ts-space-2);
+  margin-bottom: var(--ts-space-2);
 }
+
 .panel-title {
+  font-size: 16px;
   font-weight: 600;
+  color: var(--ts-text-primary);
 }
+
 .hint {
   font-size: 12px;
-  color: #909399;
-  margin-bottom: 6px;
+  color: var(--ts-text-tertiary);
+  margin-bottom: var(--ts-space-2);
 }
+
 .label-tree {
   max-height: 46vh;
   overflow: auto;
+  margin: 0 calc(-1 * var(--ts-space-2));
+  padding: 0 var(--ts-space-2);
 }
+
+.label-tree :deep(.el-tree-node__content) {
+  height: 32px;
+  border-radius: var(--ts-radius-xs);
+}
+
+.label-tree :deep(.el-tree-node__content:hover) {
+  background: var(--ts-hover-tint);
+}
+
+.label-tree :deep(.el-tree-node.is-checked > .el-tree-node__content .el-tree-node__label) {
+  color: var(--ts-jade-700);
+  font-weight: 600;
+}
+
 .selected-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 8px;
+  gap: var(--ts-space-1);
+  margin-top: var(--ts-space-2);
 }
-.sel-tag {
+
+.sel-tag.el-tag {
   margin: 0;
+  background: var(--ts-jade-50);
+  border-color: var(--ts-jade-200);
+  color: var(--ts-jade-800);
 }
+
 .panel-foot {
   display: flex;
   align-items: center;
+  gap: var(--ts-space-2);
   margin-top: auto;
-  padding-top: 12px;
-  gap: 8px;
+  padding-top: var(--ts-space-3);
+  border-top: 1px solid var(--ts-border-subtle);
 }
+
+.panel-foot-spacer {
+  flex: 1;
+}
+
 .save-state {
   font-size: 12px;
-  color: #909399;
+  font-weight: 500;
+  color: var(--ts-text-tertiary);
 }
+
 .save-state.saved {
-  color: #67c23a;
+  color: var(--ts-success);
 }
+
 .save-state.failed {
-  color: #f56c6c;
+  color: var(--ts-danger);
 }
+
 .save-state.saving {
-  color: #409eff;
+  color: var(--ts-jade-500);
+  animation: soft-pulse 1.2s var(--ts-motion-standard) infinite;
 }
+
 .save-state.dirty {
-  color: #e6a23c;
+  color: var(--ts-warning);
+}
+
+@keyframes soft-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .save-state.saving {
+    animation: none;
+  }
 }
 </style>

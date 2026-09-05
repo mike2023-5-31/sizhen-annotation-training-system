@@ -1,18 +1,30 @@
 <template>
-  <div class="train-page" style="padding: 24px">
+  <div class="train-page">
+    <header class="page-head">
+      <h1 class="page-title">模型训练</h1>
+      <p class="page-sub">
+        配置并启动后台训练任务，训练过程实时推送损失与准确率曲线
+      </p>
+    </header>
+
     <!-- ===================== 训练配置（REQ-6.9 参数可调） ===================== -->
     <el-card class="config-card">
       <template #header>
         <div class="toolbar">
           <span class="title">训练配置</span>
-          <span style="flex: 1"></span>
+          <span class="toolbar-spacer"></span>
           <el-button link type="primary" @click="goEvaluate">
             前往评估 →
           </el-button>
         </div>
       </template>
 
-      <el-form label-width="120px" label-position="right" @submit.prevent>
+      <el-form
+        label-width="120px"
+        label-position="right"
+        class="config-form"
+        @submit.prevent
+      >
         <el-form-item label="训练数据集" required>
           <el-select
             v-model="primaryId"
@@ -129,7 +141,7 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item>
+        <el-form-item class="action-item">
           <el-button type="primary" :loading="starting" @click="onStart">
             启动训练
           </el-button>
@@ -151,7 +163,7 @@
         <div class="toolbar">
           <span class="title">训练监控</span>
           <el-tag size="small" :type="wsTagType" class="ws-tag">{{ wsLabel }}</el-tag>
-          <span style="flex: 1"></span>
+          <span class="toolbar-spacer"></span>
           <el-select
             v-model="selectedJobId"
             placeholder="选择监控任务"
@@ -171,20 +183,34 @@
         <el-tag :type="statusTagType(selectedJob.status)" size="small">
           {{ statusText(selectedJob.status) }}
         </el-tag>
-        <span v-if="selectedJob.current_epoch != null && selectedJob.total_epochs">
+        <span v-if="selectedJob.current_epoch != null && selectedJob.total_epochs" class="meta-item">
           epoch {{ selectedJob.current_epoch }} / {{ selectedJob.total_epochs }}
         </span>
-        <span v-if="selectedJob.device">设备：{{ selectedJob.device }}</span>
-        <span v-if="selectedJob.use_amp">AMP/FP16</span>
-        <span v-if="selectedJob.resume_from">续训自：{{ selectedJob.resume_from }}</span>
+        <span v-if="selectedJob.device" class="meta-item">设备：{{ selectedJob.device }}</span>
+        <span v-if="selectedJob.use_amp" class="meta-item">AMP/FP16</span>
+        <span v-if="selectedJob.resume_from" class="meta-item">
+          续训自：{{ selectedJob.resume_from }}
+        </span>
         <el-text v-if="selectedJob.error" type="danger" size="small">
           {{ selectedJob.error }}
         </el-text>
       </div>
 
       <div v-if="selectedJob" class="charts">
-        <div ref="lossEl" class="chart-box" data-testid="loss-chart"></div>
-        <div ref="accEl" class="chart-box" data-testid="acc-chart"></div>
+        <div class="chart-card">
+          <div class="chart-card-head">
+            <span class="chart-title">损失曲线</span>
+            <span class="chart-hint">train / val · per epoch</span>
+          </div>
+          <div ref="lossEl" class="chart-box" data-testid="loss-chart"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-head">
+            <span class="chart-title">准确率曲线</span>
+            <span class="chart-hint">训练 / 验证 · %</span>
+          </div>
+          <div ref="accEl" class="chart-box" data-testid="acc-chart"></div>
+        </div>
       </div>
 
       <el-empty
@@ -204,7 +230,6 @@ import { LineChart } from 'echarts/charts'
 import {
   GridComponent,
   LegendComponent,
-  TitleComponent,
   TooltipComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -215,12 +240,18 @@ echarts.use([
   LineChart,
   GridComponent,
   LegendComponent,
-  TitleComponent,
   TooltipComponent,
   CanvasRenderer,
 ])
 
 const router = useRouter()
+
+// ---------------------------------------------------------------------------
+// 设计 token 读取（ECharts 画布颜色，遵循 DESIGN.md 第 2 节）
+// ---------------------------------------------------------------------------
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || undefined
+}
 
 // ---------------------------------------------------------------------------
 // 训练配置表单（键与后端 normalize_config 对齐）
@@ -542,9 +573,30 @@ function ensureCharts() {
   }
 }
 
+// 图表配色：青玉主色 + 哑蓝灰次色（数据系列区分，DESIGN.md 2.2/2.3）
+function chartPalette() {
+  return {
+    train: cssVar('--ts-jade-500'),
+    val: cssVar('--ts-info'),
+    text2: cssVar('--ts-text-secondary'),
+    text3: cssVar('--ts-text-tertiary'),
+    grid: cssVar('--ts-border-subtle'),
+  }
+}
+
+function baseAxis(pal) {
+  return {
+    axisLabel: { color: pal.text3, fontSize: 11 },
+    axisLine: { lineStyle: { color: pal.grid } },
+    axisTick: { show: false },
+    nameTextStyle: { color: pal.text3, fontSize: 11 },
+  }
+}
+
 function updateCharts(job) {
   ensureCharts()
   if (!lossChart || !accChart) return
+  const pal = chartPalette()
   const metrics = job?.metrics || []
   const epochsArr = metrics.map((m) => m.epoch)
   const trainLoss = metrics.map((m) => m.train_loss)
@@ -558,18 +610,19 @@ function updateCharts(job) {
 
   if (lossChart) {
     lossChart.setOption({
-      title: { text: '损失曲线', left: 'center', textStyle: { fontSize: 14 } },
       tooltip: { trigger: 'axis' },
-      legend: { data: ['训练损失', '验证损失'], bottom: 0 },
-      grid: { left: 48, right: 24, top: 40, bottom: 40 },
-      xAxis: { type: 'category', name: 'epoch', data: epochsArr },
-      yAxis: { type: 'value', name: 'loss' },
+      legend: { data: ['训练损失', '验证损失'], bottom: 0, textStyle: { color: pal.text2, fontSize: 12 } },
+      grid: { left: 48, right: 24, top: 24, bottom: 44 },
+      xAxis: { type: 'category', name: 'epoch', data: epochsArr, ...baseAxis(pal) },
+      yAxis: { type: 'value', name: 'loss', ...baseAxis(pal), splitLine: { lineStyle: { color: pal.grid } } },
       series: [
         {
           name: '训练损失',
           type: 'line',
           smooth: true,
           showSymbol: false,
+          itemStyle: { color: pal.train },
+          lineStyle: { color: pal.train, width: 2 },
           data: trainLoss,
         },
         {
@@ -578,6 +631,8 @@ function updateCharts(job) {
           smooth: true,
           showSymbol: false,
           connectNulls: true,
+          itemStyle: { color: pal.val },
+          lineStyle: { color: pal.val, width: 2 },
           data: valLoss,
         },
       ],
@@ -585,18 +640,19 @@ function updateCharts(job) {
   }
   if (accChart) {
     accChart.setOption({
-      title: { text: '准确率曲线（训练/验证）', left: 'center', textStyle: { fontSize: 14 } },
       tooltip: { trigger: 'axis' },
-      legend: { data: ['训练准确率', '验证准确率'], bottom: 0 },
-      grid: { left: 48, right: 24, top: 40, bottom: 40 },
-      xAxis: { type: 'category', name: 'epoch', data: epochsArr },
-      yAxis: { type: 'value', name: '%', min: 0, max: 100 },
+      legend: { data: ['训练准确率', '验证准确率'], bottom: 0, textStyle: { color: pal.text2, fontSize: 12 } },
+      grid: { left: 48, right: 24, top: 24, bottom: 44 },
+      xAxis: { type: 'category', name: 'epoch', data: epochsArr, ...baseAxis(pal) },
+      yAxis: { type: 'value', name: '%', min: 0, max: 100, ...baseAxis(pal), splitLine: { lineStyle: { color: pal.grid } } },
       series: [
         {
           name: '训练准确率',
           type: 'line',
           smooth: true,
           showSymbol: false,
+          itemStyle: { color: pal.train },
+          lineStyle: { color: pal.train, width: 2 },
           data: trainAcc,
         },
         {
@@ -605,6 +661,8 @@ function updateCharts(job) {
           smooth: true,
           showSymbol: false,
           connectNulls: true,
+          itemStyle: { color: pal.val },
+          lineStyle: { color: pal.val, width: 2 },
           data: valAcc,
         },
       ],
@@ -659,57 +717,140 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* ---- 页头 ---- */
+.page-head {
+  margin-bottom: var(--ts-space-5);
+}
+
+.page-title {
+  margin: 0 0 var(--ts-space-1);
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--ts-text-primary);
+}
+
+.page-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ts-text-secondary);
+}
+
 .toolbar {
   display: flex;
   align-items: center;
+  gap: var(--ts-space-3);
+}
+
+.toolbar-spacer {
+  flex: 1;
 }
 
 .title {
-  font-size: 1.05rem;
+  font-size: 16px;
   font-weight: 600;
+  color: var(--ts-text-primary);
 }
 
 .ws-tag {
-  margin-left: 12px;
+  margin: 0;
+}
+
+/* ---- 配置表单：软卡内适度收窄 + 标签色柔和 ---- */
+.config-form {
+  max-width: 760px;
+}
+
+.config-form :deep(.el-form-item__label) {
+  color: var(--ts-text-secondary);
+  font-weight: 500;
 }
 
 .custom-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ts-space-2);
   flex-wrap: wrap;
 }
 
 .custom-file {
-  font-size: 0.85rem;
+  font-size: 13px;
+  color: var(--ts-text-secondary);
 }
 
 .custom-name {
-  color: #606266;
-  font-size: 0.85rem;
+  color: var(--ts-text-secondary);
+  font-size: 13px;
+  font-family: var(--ts-font-mono);
+}
+
+/* 启动/停止操作行：以发丝线分隔出主操作区 */
+.action-item {
+  margin-bottom: 0;
+  padding-top: var(--ts-space-4);
+  border-top: 1px solid var(--ts-border-subtle);
+}
+
+.action-item :deep(.el-form-item__content) {
+  display: flex;
+  gap: var(--ts-space-3);
 }
 
 .monitor-card {
-  margin-top: 16px;
+  margin-top: var(--ts-space-4);
 }
 
 .job-meta {
   display: flex;
   align-items: center;
-  gap: 16px;
-  color: #606266;
-  font-size: 0.9rem;
-  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: var(--ts-space-4);
+  color: var(--ts-text-secondary);
+  font-size: 13px;
+  margin-bottom: var(--ts-space-3);
+}
+
+.meta-item {
+  font-variant-numeric: tabular-nums;
 }
 
 .charts {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: var(--ts-space-4);
+}
+
+.chart-card {
+  background: var(--ts-surface-raised);
+  border: 1px solid var(--ts-border-subtle);
+  border-radius: var(--ts-radius-md);
+  box-shadow: var(--ts-shadow-subtle);
+  padding: var(--ts-space-4) var(--ts-space-4) var(--ts-space-3);
+}
+
+.chart-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: var(--ts-space-2);
+}
+
+.chart-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ts-text-primary);
+}
+
+.chart-hint {
+  font-size: 12px;
+  color: var(--ts-text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 .chart-box {
-  height: 320px;
+  height: 300px;
   width: 100%;
 }
 

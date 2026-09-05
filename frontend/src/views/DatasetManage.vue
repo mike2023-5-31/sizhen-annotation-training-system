@@ -1,15 +1,20 @@
 <template>
-  <div class="dataset-manage" style="padding: 24px">
+  <div class="dataset-manage">
+    <header class="page-head">
+      <h1 class="page-title">数据集管理</h1>
+      <p class="page-sub">
+        创建与管理训练数据集：支持 ZIP 批量导入、内置库按时间拉取、一键导出与重命名维护
+      </p>
+    </header>
+
     <el-card>
       <template #header>
         <div class="toolbar">
-          <span class="title">数据集管理</span>
-          <span style="flex: 1"></span>
           <el-select
             v-model="currentId"
             placeholder="选择数据集"
             clearable
-            style="width: 220px; margin-right: 12px"
+            style="width: 220px"
             @change="onSelectChange"
           >
             <el-option
@@ -19,6 +24,7 @@
               :value="ds.id"
             />
           </el-select>
+          <span class="toolbar-spacer"></span>
           <el-button type="primary" @click="onCreate">新建数据集</el-button>
           <el-button @click="loadDatasets">刷新</el-button>
         </div>
@@ -52,6 +58,15 @@
             <el-button size="small" type="danger" @click="onDelete(row)">删除</el-button>
           </template>
         </el-table-column>
+        <template #empty>
+          <div class="table-empty">
+            <p class="table-empty-title">暂无数据集</p>
+            <p class="table-empty-sub">
+              创建第一个数据集，或从内置库按时间拉取已有采集记录
+            </p>
+            <el-button type="primary" @click="onCreate">新建数据集</el-button>
+          </div>
+        </template>
       </el-table>
     </el-card>
 
@@ -406,48 +421,93 @@ onMounted(loadDatasets)
 </script>
 
 <style scoped>
+/* ---- 页头（页面标题 + 副标题，DESIGN.md 3.2 Display/H1） ---- */
+.page-head {
+  margin-bottom: var(--ts-space-5);
+}
+
+.page-title {
+  margin: 0 0 var(--ts-space-1);
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--ts-text-primary);
+}
+
+.page-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ts-text-secondary);
+}
+
 .toolbar {
   display: flex;
   align-items: center;
+  gap: var(--ts-space-3);
 }
 
-.title {
-  font-size: 1.05rem;
+.toolbar-spacer {
+  flex: 1;
+}
+
+/* ---- 表格空态（组合空态：标题 + 指引 + 动作） ---- */
+.table-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ts-space-2);
+  padding: var(--ts-space-10) var(--ts-space-6);
+}
+
+.table-empty-title {
+  margin: 0;
+  font-size: 16px;
   font-weight: 600;
+  color: var(--ts-text-primary);
 }
 
+.table-empty-sub {
+  margin: 0 0 var(--ts-space-2);
+  font-size: 13px;
+  color: var(--ts-text-secondary);
+}
+
+/* ---- 导入结果汇总 ---- */
 .summary-row {
-  margin-bottom: 8px;
-  color: #303133;
+  margin-bottom: var(--ts-space-2);
+  color: var(--ts-text-primary);
 }
 
 .summary-err {
-  color: #f56c6c;
+  color: var(--ts-danger);
 }
 
 .summary-list {
   max-height: 160px;
   overflow: auto;
-  background: #f5f7fa;
-  border-radius: 4px;
-  padding: 8px 12px;
-  margin: 4px 0 12px;
+  background: var(--ts-surface-sunken);
+  border: 1px solid var(--ts-border-subtle);
+  border-radius: var(--ts-radius-sm);
+  padding: var(--ts-space-2) var(--ts-space-3);
+  margin: var(--ts-space-1) 0 var(--ts-space-3);
 }
 
 .summary-item {
-  font-size: 0.85rem;
-  color: #606266;
+  font-size: 13px;
+  color: var(--ts-text-secondary);
   line-height: 1.6;
   word-break: break-all;
 }
 
 .summary-err-list .summary-item {
-  color: #f56c6c;
+  color: var(--ts-danger);
 }
 
 .summary-more {
-  font-size: 0.8rem;
-  color: #909399;
-  margin-top: 4px;
+  font-size: 12px;
+  color: var(--ts-text-tertiary);
+  margin-top: var(--ts-space-1);
 }
 </style>

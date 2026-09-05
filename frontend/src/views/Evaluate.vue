@@ -1,15 +1,20 @@
 <template>
-  <div class="eval-page" style="padding: 24px">
+  <div class="eval-page">
+    <header class="page-head">
+      <h1 class="page-title">评估可视化</h1>
+      <p class="page-sub">
+        查看已完成训练任务的验证集混淆矩阵与 one-vs-rest ROC 曲线（含 AUC）
+      </p>
+    </header>
+
     <el-card>
       <template #header>
         <div class="toolbar">
-          <span class="title">评估可视化（混淆矩阵 / ROC）</span>
-          <span style="flex: 1"></span>
           <el-select
             v-model="jobId"
             placeholder="选择训练任务"
             :loading="jobsLoading"
-            style="width: 300px; margin-right: 12px"
+            style="width: 300px"
             @change="loadEval"
           >
             <el-option
@@ -23,7 +28,8 @@
             查询评估
           </el-button>
           <el-button @click="loadJobs">刷新</el-button>
-          <el-button link type="primary" style="margin-left: 8px" @click="goTrain">
+          <span class="toolbar-spacer"></span>
+          <el-button link type="primary" @click="goTrain">
             ← 返回训练
           </el-button>
         </div>
@@ -108,6 +114,25 @@ echarts.use([
 
 const route = useRoute()
 const router = useRouter()
+
+// ---------------------------------------------------------------------------
+// 设计 token 读取（ECharts 画布颜色，遵循 DESIGN.md 第 2 节）
+// ---------------------------------------------------------------------------
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || undefined
+}
+
+function chartPalette() {
+  return {
+    jade50: cssVar('--ts-jade-50'),
+    jade300: cssVar('--ts-jade-300'),
+    jade500: cssVar('--ts-jade-500'),
+    jade900: cssVar('--ts-jade-900'),
+    text2: cssVar('--ts-text-secondary'),
+    text3: cssVar('--ts-text-tertiary'),
+    grid: cssVar('--ts-border-subtle'),
+  }
+}
 
 const STATUS_TEXT = {
   created: '已创建',
@@ -230,6 +255,7 @@ function renderHeatmap(cat) {
   const matrix = confusion.value[cat.name]
   if (!matrix || !matrix.length) return
 
+  const pal = chartPalette()
   const n = matrix.length
   const axisLabels = Array.from({ length: n }, (_, i) => labelOf(cat.name, i))
   const data = []
@@ -251,7 +277,7 @@ function renderHeatmap(cat) {
     title: {
       text: `${cat.name} 混淆矩阵`,
       left: 'center',
-      textStyle: { fontSize: 14 },
+      textStyle: { fontSize: 14, color: pal.text2, fontWeight: 500 },
     },
     tooltip: {
       position: 'top',
@@ -265,8 +291,10 @@ function renderHeatmap(cat) {
       name: '预测',
       nameLocation: 'middle',
       nameGap: 34,
-      axisLabel: { rotate: 30, fontSize: 10 },
-      splitArea: { show: true },
+      axisLabel: { rotate: 30, fontSize: 10, color: pal.text3 },
+      axisLine: { lineStyle: { color: pal.grid } },
+      nameTextStyle: { color: pal.text3, fontSize: 11 },
+      splitArea: { show: true, areaStyle: { color: ['transparent'] } },
     },
     yAxis: {
       type: 'category',
@@ -274,8 +302,10 @@ function renderHeatmap(cat) {
       name: '真实',
       nameLocation: 'middle',
       nameGap: 60,
-      axisLabel: { fontSize: 10 },
-      splitArea: { show: true },
+      axisLabel: { fontSize: 10, color: pal.text3 },
+      axisLine: { lineStyle: { color: pal.grid } },
+      nameTextStyle: { color: pal.text3, fontSize: 11 },
+      splitArea: { show: true, areaStyle: { color: ['transparent'] } },
     },
     visualMap: {
       min: 0,
@@ -284,14 +314,14 @@ function renderHeatmap(cat) {
       orient: 'horizontal',
       left: 'center',
       bottom: 4,
-      inRange: { color: ['#f0f9ff', '#7cc5ff', '#409eff', '#1d4ed8'] },
+      inRange: { color: [pal.jade50, pal.jade300, pal.jade500, pal.jade900] },
     },
     series: [
       {
         type: 'heatmap',
         data,
-        label: { show: true, fontSize: 10 },
-        emphasis: { itemStyle: { shadowBlur: 6, shadowColor: 'rgba(0,0,0,0.3)' } },
+        label: { show: true, fontSize: 10, color: pal.text2 },
+        emphasis: { itemStyle: { shadowBlur: 6, shadowColor: 'hsla(150, 20%, 30%, 0.3)' } },
       },
     ],
   })
@@ -303,6 +333,7 @@ function renderRoc(cat) {
   const roc = rocData.value[cat.name]
   if (!roc || !roc.fpr || !roc.tpr) return
 
+  const pal = chartPalette()
   const auc = Number(roc.auc)
   const points = roc.fpr.map((f, i) => [f, roc.tpr[i]])
 
@@ -315,27 +346,47 @@ function renderRoc(cat) {
     title: {
       text: `${cat.name} ROC（AUC = ${Number.isFinite(auc) ? auc.toFixed(3) : '—'}）`,
       left: 'center',
-      textStyle: { fontSize: 14 },
+      textStyle: { fontSize: 14, color: pal.text2, fontWeight: 500 },
     },
     tooltip: { trigger: 'axis' },
     grid: { left: 56, right: 24, top: 46, bottom: 40 },
-    xAxis: { type: 'value', name: 'FPR', min: 0, max: 1 },
-    yAxis: { type: 'value', name: 'TPR', min: 0, max: 1 },
+    xAxis: {
+      type: 'value',
+      name: 'FPR',
+      min: 0,
+      max: 1,
+      axisLabel: { color: pal.text3, fontSize: 11 },
+      axisLine: { lineStyle: { color: pal.grid } },
+      nameTextStyle: { color: pal.text3, fontSize: 11 },
+      splitLine: { lineStyle: { color: pal.grid } },
+    },
+    yAxis: {
+      type: 'value',
+      name: 'TPR',
+      min: 0,
+      max: 1,
+      axisLabel: { color: pal.text3, fontSize: 11 },
+      axisLine: { lineStyle: { color: pal.grid } },
+      nameTextStyle: { color: pal.text3, fontSize: 11 },
+      splitLine: { lineStyle: { color: pal.grid } },
+    },
     series: [
       {
         name: `${cat.name} ROC`,
         type: 'line',
         showSymbol: false,
+        itemStyle: { color: pal.jade500 },
+        lineStyle: { color: pal.jade500, width: 2 },
+        areaStyle: { opacity: 0.12, color: pal.jade500 },
         data: points,
-        areaStyle: { opacity: 0.08 },
       },
       {
         name: '随机基线',
         type: 'line',
         showSymbol: false,
         silent: true,
-        lineStyle: { type: 'dashed', color: '#c0c4cc' },
-        itemStyle: { color: '#c0c4cc' },
+        lineStyle: { type: 'dashed', color: pal.text3 },
+        itemStyle: { color: pal.text3 },
         data: [
           [0, 0],
           [1, 1],
@@ -387,30 +438,72 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* ---- 页头 ---- */
+.page-head {
+  margin-bottom: var(--ts-space-5);
+}
+
+.page-title {
+  margin: 0 0 var(--ts-space-1);
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--ts-text-primary);
+}
+
+.page-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ts-text-secondary);
+}
+
 .toolbar {
   display: flex;
   align-items: center;
+  gap: var(--ts-space-3);
 }
 
-.title {
-  font-size: 1.05rem;
-  font-weight: 600;
+.toolbar-spacer {
+  flex: 1;
 }
 
 .loading-box {
   min-height: 200px;
 }
 
+/* ---- 分区标题：青玉竖条强调（DESIGN.md 2.2） ---- */
 .section-title {
-  margin: 20px 0 12px;
-  font-size: 1rem;
-  color: #303133;
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-2);
+  margin: var(--ts-space-8) 0 var(--ts-space-4);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ts-text-primary);
+}
+
+.section-title::before {
+  content: '';
+  width: 4px;
+  height: 16px;
+  border-radius: var(--ts-radius-pill);
+  background: var(--ts-jade-500);
 }
 
 .matrix-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 16px;
+  gap: var(--ts-space-4);
+}
+
+.chart-item {
+  background: var(--ts-surface-raised);
+  border: 1px solid var(--ts-border-subtle);
+  border-radius: var(--ts-radius-md);
+  box-shadow: var(--ts-shadow-subtle);
+  padding: var(--ts-space-3);
 }
 
 .chart-box {
@@ -423,9 +516,10 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #909399;
-  background: #fafafa;
-  border-radius: 4px;
+  color: var(--ts-text-tertiary);
+  background: var(--ts-surface-sunken);
+  border-radius: var(--ts-radius-sm);
+  font-size: 13px;
 }
 
 @media (max-width: 1100px) {
