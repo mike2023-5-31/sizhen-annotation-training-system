@@ -10,13 +10,27 @@
     <el-card>
       <template #header>
         <div class="toolbar">
+          <el-select
+            v-model="currentId"
+            placeholder="筛选数据集"
+            clearable
+            filterable
+            style="width: 220px"
+          >
+            <el-option
+              v-for="ds in datasets"
+              :key="ds.id"
+              :label="ds.name"
+              :value="ds.id"
+            />
+          </el-select>
           <span class="toolbar-spacer"></span>
           <el-button type="primary" @click="onCreate">新建数据集</el-button>
           <el-button @click="loadDatasets">刷新</el-button>
         </div>
       </template>
 
-      <el-table :data="datasets" v-loading="loading" border stripe>
+      <el-table :data="filteredDatasets" v-loading="loading" border stripe>
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column prop="name" label="名称" min-width="160" />
         <el-table-column prop="created_at" label="创建时间" width="200" />
@@ -156,12 +170,20 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
 
 const datasets = ref([])
 const loading = ref(false)
+
+// --- 数据集筛选（工具条下拉：选中后表格只显示该数据集，清除则显示全部）---
+const currentId = ref(null)
+const filteredDatasets = computed(() =>
+  currentId.value == null
+    ? datasets.value
+    : datasets.value.filter((d) => d.id === currentId.value),
+)
 
 // --- ZIP 导入（REQ-6.2a）---
 const importInput = ref(null)
@@ -188,6 +210,10 @@ async function loadDatasets() {
   try {
     const { data } = await api.get('/datasets')
     datasets.value = data
+    // 被筛选的数据集已不存在时回退为「显示全部」，避免表格被残留 id 过滤空
+    if (currentId.value != null && !data.some((d) => d.id === currentId.value)) {
+      currentId.value = null
+    }
   } catch (err) {
     ElMessage.error(`加载数据集失败：${errText(err)}`)
   } finally {
@@ -254,6 +280,7 @@ async function onDelete(row) {
   }
   try {
     await api.delete(`/datasets/${row.id}`)
+    if (currentId.value === row.id) currentId.value = null
     await loadDatasets()
     ElMessage.success(`数据集「${row.name}」已删除`)
   } catch (err) {
