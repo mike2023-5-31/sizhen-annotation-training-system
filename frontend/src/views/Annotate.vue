@@ -1,20 +1,32 @@
 <template>
   <div class="annotate">
-    <el-empty
-      v-if="!datasetId"
-      description="请从数据集管理页进入标注页（URL 需携带 ?dataset=数据集ID）"
-    />
-    <template v-else>
-      <header class="page-head">
-        <div class="page-title-row">
-          <h1 class="page-title">图片标注</h1>
-          <span class="dataset-chip">数据集 #{{ datasetId }}</span>
-        </div>
-        <p class="page-sub">
-          逐图勾选四诊标签（每类单选）· ←/→ 翻图 · 1–4 定位类别 · Q 质量 · S 保存
-        </p>
-      </header>
+    <header class="page-head">
+      <div class="page-title-row">
+        <h1 class="page-title">图片标注</h1>
+        <span v-if="datasetId" class="dataset-chip">数据集 #{{ datasetId }}</span>
+      </div>
+      <p class="page-sub">
+        逐图勾选四诊标签（每类单选）· ←/→ 翻图 · 1–4 定位类别 · Q 质量 · S 保存
+      </p>
+      <div class="dataset-picker">
+        <el-select
+          v-model="selectedDataset"
+          placeholder="选择数据集"
+          filterable
+          clearable
+          style="width: 320px"
+        >
+          <el-option
+            v-for="ds in datasets"
+            :key="ds.id"
+            :label="ds.name"
+            :value="ds.id"
+          />
+        </el-select>
+      </div>
+    </header>
 
+    <template v-if="datasetId">
       <el-card>
         <template #header>
           <div class="toolbar">
@@ -111,27 +123,46 @@
         </div>
       </el-card>
     </template>
+    <el-empty v-else description="请选择要标注的数据集" />
   </div>
 </template>
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
 
 const route = useRoute()
+const router = useRouter()
 
 const images = ref([])
 const currentIndex = ref(0)
 const query = ref('')
 const loading = ref(false)
 const hasSearched = ref(false)
+const datasets = ref([])
 
 const datasetId = computed(() => {
   const raw = Number(route.query.dataset)
   return Number.isInteger(raw) && raw > 0 ? raw : null
 })
+
+// 数据集选择器：绑定当前数据集，选择/清除时同步到路由（驱动既有 load 流程）
+const selectedDataset = computed({
+  get: () => datasetId.value,
+  set: (val) => onSelectDataset(val),
+})
+
+function onSelectDataset(val) {
+  if (val === datasetId.value) return
+  flushPendingNow() // 切走前把旧图待写快照落盘（写入旧数据集）
+  if (val === null || val === undefined || val === '') {
+    router.replace({ query: {} })
+  } else {
+    router.replace({ query: { dataset: val } })
+  }
+}
 
 const currentImage = computed(() => images.value[currentIndex.value] || '')
 const imageSrc = computed(() =>
@@ -417,6 +448,15 @@ function onKeydown(e) {
 
 // ---------------------------------------------------------------- 浏览（T9）
 
+async function loadDatasets() {
+  try {
+    const { data } = await api.get('/datasets')
+    datasets.value = Array.isArray(data) ? data : []
+  } catch (err) {
+    ElMessage.error(`加载数据集列表失败：${errText(err)}`)
+  }
+}
+
 async function loadImages() {
   if (!datasetId.value) return
   loading.value = true
@@ -475,7 +515,22 @@ async function loadCategories() {
 }
 
 watch(datasetId, (val, old) => {
-  if (val !== old) loadImages()
+  if (val !== old) {
+    if (!val) {
+      // 清空选择：回到未选择数据集状态
+      images.value = []
+      currentIndex.value = 0
+      query.value = ''
+      hasSearched.value = false
+      saveState.value = ''
+      pendingSave = null
+      if (saveTimer) {
+        clearTimeout(saveTimer)
+        saveTimer = null
+      }
+    }
+    loadImages()
+  }
 })
 
 watch(currentImage, (val, old) => {
@@ -484,6 +539,7 @@ watch(currentImage, (val, old) => {
 })
 
 onMounted(() => {
+  loadDatasets()
   loadImages()
   loadCategories()
   window.addEventListener('keydown', onKeydown)
@@ -531,6 +587,10 @@ onBeforeUnmount(() => {
   font-size: 13px;
   line-height: 1.5;
   color: var(--ts-text-secondary);
+}
+
+.dataset-picker {
+  margin-top: var(--ts-space-3);
 }
 
 .toolbar {
