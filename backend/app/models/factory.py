@@ -212,3 +212,66 @@ def load_custom_model(py_path: str, num_classes: List[int]) -> nn.Module:
         return model
     finally:
         sys.modules.pop(module_name, None)
+
+
+class _CustomOutputWrapper(nn.Module):
+    """自定义模型输出契约包装（需求 6.7）：统一为 4 个分类头 logits 的 dict。
+
+    构造时用 ``(1, 3, 224, 224)`` 随机输入做一次无梯度前向校验输出契约：
+    - ``dict``：必须包含全部 4 个 category 键（多出键忽略，按 CATEGORIES
+      顺序输出）；
+    - ``tuple``/``list``：必须恰好 4 个张量，按 CATEGORIES 顺序映射为
+      4 个分类头；
+    - 其它类型 → ``ValueError``「自定义模型输出需为 4 个分类头 logits」。
+
+    属性：``category_names`` / ``num_classes``（供训练循环、checkpoint 元数据
+    与推理 taxonomy 校验消费）。``forward(x)`` 每次前向同样做归一化。
+    """
+
+    def __init__(
+        self, model: nn.Module, category_names: List[str], num_classes: List[int]
+    ) -> None:
+        super().__init__()
+        self.model = model
+        self.category_names = list(category_names)
+        self.num_classes = list(num_classes)
+        # 构造期契约校验（无梯度冒烟前向；输出非法 → 立即 ValueError）
+        with torch.no_grad():
+            self._normalize(self.model(torch.randn(1, 3, 224, 224)))
+
+    def _normalize(self, outs: Any) -> Dict[str, Tensor]:
+        names = self.category_names
+        if isinstance(outs, dict):
+            if any(name not in outs for name in names):
+                raise ValueError("自定义模型输出需为 4 个分类头 logits")
+            return {name: outs[name] for name in names}
+        if isinstance(outs, (tuple, list)):
+            if len(outs) != len(names):
+                raise ValueError("自定义模型输出需为 4 个分类头 logits")
+            return {name: out for name, out in zip(names, outs)}
+        raise ValueError("自定义模型输出需为 4 个分类头 logits")
+
+    def forward(self, x: Tensor) -> Dict[str, Tensor]:
+        return self._normalize(self.model(x))
+
+
+def wrap_custom_model(model: nn.Module, num_classes: List[int]) -> nn.Module:
+    """校验并包装自定义模型输出为统一的 4 分类头 logits dict（需求 6.7）。
+
+    供训练引擎（T13）与推理服务（T17）加载自定义模型后调用：包装器构造期
+    用无梯度冒烟前向校验输出契约，之后每次 ``forward`` 都归一化为
+    ``dict[str, Tensor]``（键序 = CATEGORIES）。
+
+    Args:
+        model: ``load_custom_model`` 返回的 nn.Module。
+        num_classes: 长度 4 的类别数列表（顺序与 CATEGORIES 一致）。
+
+    Returns:
+        ``_CustomOutputWrapper`` 实例（带 category_names/num_classes 属性）。
+
+    Raises:
+        ValueError: 输出既不是含 4 分类头的 dict，也不是恰好 4 个张量的
+            tuple/list。
+    """
+    nc = _validate_num_classes(num_classes)
+    return _CustomOutputWrapper(model, CATEGORY_NAMES, nc)

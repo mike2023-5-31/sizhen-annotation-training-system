@@ -10,20 +10,6 @@
     <el-card>
       <template #header>
         <div class="toolbar">
-          <el-select
-            v-model="currentId"
-            placeholder="选择数据集"
-            clearable
-            style="width: 220px"
-            @change="onSelectChange"
-          >
-            <el-option
-              v-for="ds in datasets"
-              :key="ds.id"
-              :label="ds.name"
-              :value="ds.id"
-            />
-          </el-select>
           <span class="toolbar-spacer"></span>
           <el-button type="primary" @click="onCreate">新建数据集</el-button>
           <el-button @click="loadDatasets">刷新</el-button>
@@ -176,7 +162,6 @@ import api from '../api'
 
 const datasets = ref([])
 const loading = ref(false)
-const currentId = ref(null)
 
 // --- ZIP 导入（REQ-6.2a）---
 const importInput = ref(null)
@@ -203,20 +188,11 @@ async function loadDatasets() {
   try {
     const { data } = await api.get('/datasets')
     datasets.value = data
-    if (currentId.value && !data.some((d) => d.id === currentId.value)) {
-      currentId.value = null
-    }
   } catch (err) {
     ElMessage.error(`加载数据集失败：${errText(err)}`)
   } finally {
     loading.value = false
   }
-}
-
-function onSelectChange() {
-  ElMessage.info(
-    currentId.value ? `已选择数据集 #${currentId.value}` : '已清除选择',
-  )
 }
 
 async function promptName(title, placeholder, initialValue = '') {
@@ -238,7 +214,6 @@ async function onCreate() {
     const name = await promptName('新建数据集', '请输入数据集名称')
     const { data } = await api.post('/datasets', { name })
     await loadDatasets()
-    currentId.value = data.id
     ElMessage.success(`数据集「${data.name}」创建成功`)
   } catch (err) {
     if (err === 'cancel' || err === 'close') return
@@ -279,7 +254,6 @@ async function onDelete(row) {
   }
   try {
     await api.delete(`/datasets/${row.id}`)
-    if (currentId.value === row.id) currentId.value = null
     await loadDatasets()
     ElMessage.success(`数据集「${row.name}」已删除`)
   } catch (err) {

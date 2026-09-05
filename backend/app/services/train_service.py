@@ -49,6 +49,7 @@ from sqlalchemy import select
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
+from app import config
 from app.config import MODEL_DIR
 from app.db import SessionLocal
 from app.labels_config import CATEGORIES, num_classes_per_head
@@ -126,14 +127,17 @@ def _build_loss(kind: str) -> nn.Module:
 def normalize_config(raw: Optional[dict[str, Any]]) -> dict[str, Any]:
     """归一化并校验训练配置，产出 canonical dict。
 
-    键：``backbone``（resnet18/resnet50）、``datasets``（非空 id 列表，首个为主
+    键：``backbone``（resnet18/resnet50/custom）、``datasets``（非空 id 列表，首个为主
     训练集、其余叠加，REQ-6.6）、``lr``、``batch_size``、``epochs``、``optimizer``
     （sgd/adam/adamw）、``dropout``、``loss``（crossentropy/focalloss）、
     ``augmentation``（列表）、``fp16``（bool）、``val_split``、``seed``、
     ``resume_from``（可选路径）、``model_dir``（可选，默认 ``config.MODEL_DIR``）。
+    ``backbone="custom"`` 时必须提供 ``custom_model_path``（需求 6.7：MODEL_DIR 内
+    相对 .py 路径，防路径穿越），归一化后保留原值。
 
     Raises:
-        ValueError: 任一键取值非法 / backbone、optimizer、loss、增强方式不受支持。
+        ValueError: 任一键取值非法 / backbone、optimizer、loss、增强方式不受支持 /
+            custom 缺 custom_model_path 或路径非法 / 自定义模型文件不存在。
     """
     if raw is None:
         raw = {}
@@ -143,11 +147,16 @@ def normalize_config(raw: Optional[dict[str, Any]]) -> dict[str, Any]:
     cfg: dict[str, Any] = {}
 
     backbone = str(raw.get("backbone", "resnet18")).lower()
-    if backbone not in _SUPPORTED_BACKBONES:
+    if backbone not in _SUPPORTED_BACKBONES and backbone != "custom":
         raise ValueError(
-            f"不支持的 backbone：{backbone!r}（仅支持 resnet18 / resnet50）"
+            f"不支持的 backbone：{backbone!r}（仅支持 resnet18 / resnet50 / custom）"
         )
     cfg["backbone"] = backbone
+
+    if backbone == "custom":
+        custom_model_path = raw.get("custom_model_path")
+        _resolve_custom_model_path(custom_model_path)  # .py / 防穿越 / 文件存在
+        cfg["custom_model_path"] = str(custom_model_path).strip()
 
     cfg["datasets"] = _normalize_datasets(raw.get("datasets"))
 
@@ -265,6 +274,30 @@ def _normalize_augmentation(raw: Any) -> list[str]:
         if canon not in canonical:
             canonical.append(canon)
     return canonical
+
+
+def _resolve_custom_model_path(rel_path: Any) -> Path:
+    """校验 custom_model_path 为 MODEL_DIR 内相对 .py 路径（需求 6.7，NF-7.4
+    防路径穿越），返回绝对路径。
+
+    Raises:
+        ValueError: 非字符串/空 / 绝对路径 / 非 .py / ``..`` 穿越出模型目录 /
+            文件不存在。
+    """
+    if not isinstance(rel_path, str) or not rel_path.strip():
+        raise ValueError("backbone=custom 时必须提供 custom_model_path（模型目录内的 .py 相对路径）")
+    requested = Path(rel_path.strip())
+    if requested.is_absolute():
+        raise ValueError("custom_model_path 仅支持模型目录内的相对路径")
+    if requested.suffix.lower() != ".py":
+        raise ValueError("custom_model_path 必须为 .py 模型文件")
+    model_dir = config.MODEL_DIR.resolve()
+    resolved = (model_dir / requested).resolve()
+    if resolved != model_dir and model_dir not in resolved.parents:
+        raise ValueError("custom_model_path 越出模型目录（非法路径）")
+    if not resolved.is_file():
+        raise ValueError(f"自定义模型文件不存在：{requested}")
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +451,36 @@ def _split_train_val(
 # ---------------------------------------------------------------------------
 
 
+def _build_base_model(
+    architecture: str,
+    cfg: dict[str, Any],
+    payload: Optional[dict[str, Any]] = None,
+) -> nn.Module:
+    """按架构重建基础模型（需求 6.7）。
+
+    - resnet18/resnet50 → ``factory.build_model``（原路径不变）；
+    - custom → ``factory.load_custom_model`` + ``factory.wrap_custom_model``
+      （输出契约归一化为 4 分类头 logits dict）。``custom_model_path`` 优先取
+      存档（payload），其次取配置；缺失/文件不存在 → ValueError。
+    """
+    num_classes = num_classes_per_head()
+    if architecture != "custom":
+        return factory.build_model(
+            architecture, list(num_classes), dropout=cfg["dropout"]
+        )
+    rel_path = (payload.get("custom_model_path") if payload else None) or cfg.get(
+        "custom_model_path"
+    )
+    if not rel_path:
+        raise ValueError(
+            "custom 模型缺少 custom_model_path，无法重建（请重新上传自定义模型 .py 后重试）"
+        )
+    custom_model = factory.load_custom_model(
+        str(_resolve_custom_model_path(rel_path)), list(num_classes)
+    )
+    return factory.wrap_custom_model(custom_model, list(num_classes))
+
+
 def _build_optimizer(model: nn.Module, cfg: dict[str, Any]) -> torch.optim.Optimizer:
     kind = cfg["optimizer"]
     params = model.parameters()
@@ -492,6 +555,7 @@ def _save_checkpoint(
         "best_metric": float(best_metric) if best_metric is not None else None,
         "config": cfg,
         "architecture": cfg["backbone"],
+        "custom_model_path": cfg.get("custom_model_path"),
         "num_classes": list(num_classes),
         "category_names": list(category_names),
         "dropout": cfg["dropout"],
@@ -523,7 +587,7 @@ def _load_resume_payload(
     num_classes = checkpoint.get("num_classes")
     model_state = checkpoint.get("model_state")
     if (
-        architecture not in _SUPPORTED_BACKBONES
+        (architecture not in _SUPPORTED_BACKBONES and architecture != "custom")
         or not isinstance(num_classes, list)
         or model_state is None
     ):
@@ -555,6 +619,7 @@ def _load_resume_payload(
         "epoch": int(checkpoint.get("epoch") or 0),
         "best_metric": checkpoint.get("best_metric"),
         "architecture": architecture,
+        "custom_model_path": checkpoint.get("custom_model_path"),
         "config": dict(checkpoint.get("config") or {}),
     }
 
@@ -801,12 +866,11 @@ class TrainManager:
         use_amp = n_gpus > 0 and cfg["fp16"]  # 无 GPU → FP32（REQ-6.8-3）
         self._update(job, device=str(device), use_amp=use_amp)
 
-        # 模型（T12 build_model；续训时 architecture 以存档为准）
+        # 模型（T12 build_model；custom 走 load_custom_model + 输出契约包装；
+        # 续训时 architecture 以存档为准）
         architecture = payload["architecture"] if payload else cfg["backbone"]
         num_classes = num_classes_per_head()
-        base_model = factory.build_model(
-            architecture, list(num_classes), dropout=cfg["dropout"]
-        )
+        base_model = _build_base_model(architecture, cfg, payload)
         if payload:
             base_model.load_state_dict(payload["model_state"])
         model = nn.DataParallel(base_model) if n_gpus > 1 else base_model
@@ -1135,10 +1199,7 @@ def _eval_from_checkpoint(
     """
     payload = _load_resume_payload(checkpoint_path, cfg)
     device, _n_gpus = resolve_device()
-    num_classes = num_classes_per_head()
-    model = factory.build_model(
-        payload["architecture"], list(num_classes), dropout=float(cfg.get("dropout", 0.0))
-    )
+    model = _build_base_model(payload["architecture"], cfg, payload)
     model.load_state_dict(payload["model_state"])
     model = model.to(device)
 

@@ -59,10 +59,20 @@
             <el-radio value="custom">自定义上传</el-radio>
           </el-radio-group>
           <div v-if="backbone === 'custom'" class="custom-row">
-            <input type="file" accept=".py" class="custom-file" @change="onCustomFile" />
+            <input
+              type="file"
+              accept=".py"
+              class="custom-file"
+              data-testid="custom-model-file-input"
+              :disabled="customUploading"
+              @change="onCustomFile"
+            />
             <span v-if="customFileName" class="custom-name">{{ customFileName }}</span>
-            <el-text type="warning" size="small">
-              训练引擎当前仅支持 ResNet18/ResNet50 骨干；自定义模型（.py）请在「批量推理」页加载使用
+            <el-tag v-if="customModelPath" type="success" size="small">
+              已上传：{{ customModelPath }}
+            </el-tag>
+            <el-text type="info" size="small">
+              上传 .py（需暴露 build_model(num_classes) 或 Model 类，输出 4 个分类头 logits）
             </el-text>
           </div>
         </el-form-item>
@@ -262,6 +272,8 @@ const primaryId = ref(null) // 主训练集（必选）
 const extraIds = ref([]) // 追加数据集（可选）
 const backbone = ref('resnet18')
 const customFileName = ref('')
+const customModelPath = ref('') // POST /models/custom 返回的模型目录相对路径
+const customUploading = ref(false)
 const lr = ref(0.001)
 const batchSize = ref(16)
 const epochs = ref(10)
@@ -360,9 +372,29 @@ async function loadCheckpoints() {
   }
 }
 
-function onCustomFile(event) {
+async function onCustomFile(event) {
   const file = event.target.files?.[0]
-  customFileName.value = file ? file.name : ''
+  // 清空 value：同一文件可重复选择
+  event.target.value = ''
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.py')) {
+    ElMessage.warning('请选择 .py 自定义模型文件')
+    return
+  }
+  customUploading.value = true
+  customFileName.value = file.name
+  customModelPath.value = ''
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const { data } = await api.post('/models/custom', form)
+    customModelPath.value = data.model_path
+    ElMessage.success(`自定义模型已上传：${data.model_path}`)
+  } catch (err) {
+    ElMessage.error(`自定义模型上传失败：${errText(err)}`)
+  } finally {
+    customUploading.value = false
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -373,8 +405,8 @@ async function onStart() {
     ElMessage.warning('请先选择主训练数据集')
     return
   }
-  if (backbone.value === 'custom') {
-    ElMessage.warning('训练引擎当前仅支持 ResNet18/ResNet50，自定义模型训练暂未开放')
+  if (backbone.value === 'custom' && !customModelPath.value) {
+    ElMessage.warning('请先上传自定义模型 .py 文件（输出 4 个分类头 logits）')
     return
   }
   starting.value = true
@@ -391,6 +423,7 @@ async function onStart() {
       fp16: fp16.value,
       datasets: [primaryId.value, ...extraIds.value],
     }
+    if (backbone.value === 'custom') payload.custom_model_path = customModelPath.value
     if (resumeFrom.value) payload.resume_from = resumeFrom.value
     const { data } = await api.post('/training/start', payload)
     currentJobId.value = data.job_id
@@ -680,6 +713,14 @@ watch(selectedJob, async (job) => {
   await nextTick()
   ensureCharts()
   updateCharts(job)
+})
+
+// 切换回 resnet 骨干时清空已上传的自定义模型状态（避免误传 stale 路径）
+watch(backbone, (val) => {
+  if (val !== 'custom') {
+    customModelPath.value = ''
+    customFileName.value = ''
+  }
 })
 
 // ---------------------------------------------------------------------------

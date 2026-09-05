@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import config
-from app.routers import annotations, datasets, images, inference, onnx, training
+from app.routers import annotations, datasets, images, inference, models, onnx, training
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -63,6 +63,9 @@ api_router.include_router(annotations.router)
 
 # 业务路由（推理：模型列表/批量预测/预标注 XML，T17）
 api_router.include_router(inference.router)
+
+# 业务路由（自定义模型上传，需求 6.7）
+api_router.include_router(models.router)
 
 # 业务路由（训练监控：状态轮询/评估结果/指标 WebSocket，T14）
 api_router.include_router(training.router)

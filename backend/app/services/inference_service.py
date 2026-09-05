@@ -15,9 +15,11 @@
   写到图片旁（同一位置，标注界面 T10 直接读取），不覆盖已有人工标注
   （REQ-6.18-4）。返回生成数量。
 
-约束（锁定决策 8 / 决策 6 精神）：
-- 结构读取仅保证 resnet18/resnet50；其余 ``architecture`` 一律按「无法识别」
-  处理，显式报错，不猜测结构；
+约束（锁定决策 8 / 决策 6 精神 / 需求 6.7）：
+- 结构读取仅保证 resnet18/resnet50；``architecture == "custom"`` 时按 checkpoint
+  内 ``custom_model_path`` 经 ``factory.load_custom_model`` 重建并做输出契约
+  包装，缺少 ``custom_model_path`` 或文件缺失 → 明确 ``ValueError``；
+- 其余 ``architecture`` 一律按「无法识别」处理，显式报错，不猜测结构；
 - 推理前校验模型类别数与当前 ``labels.yaml`` 一致（4 头类别数逐一相等），
   taxonomy 不一致 → 硬失败，绝不静默按错误下标映射子标签名。
 """
@@ -32,6 +34,7 @@ from PIL import Image
 from sqlalchemy import select
 from torchvision import transforms
 
+from app import config
 from app.db import SessionLocal
 from app.labels_config import CATEGORIES, num_classes_per_head
 from app.models import factory
@@ -68,24 +71,48 @@ def _category_names() -> list[str]:
     return [c["name"] for c in CATEGORIES]
 
 
+def _resolve_custom_model_path(rel_path: str) -> Path:
+    """把 checkpoint 内的 custom_model_path 解析到 MODEL_DIR 内（需求 6.7，
+    NF-7.4 防路径穿越），返回绝对路径。
+
+    Raises:
+        ValueError: 绝对路径 / 非 .py / ``..`` 穿越出模型目录 / 文件不存在。
+    """
+    requested = Path(rel_path)
+    if requested.is_absolute():
+        raise ValueError("custom_model_path 仅支持模型目录内的相对路径")
+    if requested.suffix.lower() != ".py":
+        raise ValueError("custom_model_path 必须为 .py 模型文件")
+    model_dir = config.MODEL_DIR.resolve()
+    resolved = (model_dir / requested).resolve()
+    if resolved != model_dir and model_dir not in resolved.parents:
+        raise ValueError("custom_model_path 越出模型目录（非法路径）")
+    if not resolved.is_file():
+        raise ValueError(f"自定义模型文件不存在：{requested}")
+    return resolved
+
+
 def load_model_from_dir(path: str) -> tuple[nn.Module, dict[str, Any]]:
     """从 checkpoint 文件重建网络并载权（REQ-6.16-3 / REQ-6.18-3）。
 
     checkpoint 契约（T13 产出）：dict 含 ``model_state``（state_dict）、
-    ``architecture``（'resnet18'/'resnet50'）、``num_classes``（长度 4 的类别数
-    列表）、``category_names``（4 个 category 名）等元数据。
+    ``architecture``（'resnet18'/'resnet50'/'custom'）、``num_classes``（长度 4 的
+    类别数列表）、``category_names``（4 个 category 名）等元数据；
+    ``architecture == "custom"`` 时另需 ``custom_model_path``（模型目录内相对
+    .py 路径）以重建结构。
 
     Args:
         path: checkpoint 文件路径（.pth，位于模型目录 MODEL_DIR 内）。
 
     Returns:
         ``(model, meta)``：model 为 eval 模式、已载权的四头分类器；
-        meta 为 checkpoint 元数据 dict（architecture/num_classes/category_names/
-        dropout 等原样保留）。
+        meta 为 checkpoint 元数据 dict（architecture/custom_model_path/
+        num_classes/category_names/dropout 等原样保留）。
 
     Raises:
         ValueError: 文件不存在 / 非 checkpoint dict / 缺 ``architecture`` 或
-            ``num_classes``（第三方权重）/ 结构不受支持 / 缺 ``model_state`` /
+            ``num_classes``（第三方权重）/ 结构不受支持 / custom 存档缺
+            ``custom_model_path`` 或模型文件缺失 / 缺 ``model_state`` /
             权重与结构不匹配。
     """
     ckpt_path = Path(path)
@@ -107,7 +134,8 @@ def load_model_from_dir(path: str) -> tuple[nn.Module, dict[str, Any]]:
 
     if architecture is None or num_classes is None:
         raise ValueError(_UNRECOGNIZED_MSG)
-    if architecture not in _SUPPORTED_ARCHITECTURES:
+    is_custom = architecture == "custom"
+    if not is_custom and architecture not in _SUPPORTED_ARCHITECTURES:
         raise ValueError(_UNRECOGNIZED_MSG)
     if model_state is None:
         raise ValueError(f"checkpoint 缺少 model_state 权重（文件损坏）：{ckpt_path}")
@@ -120,11 +148,22 @@ def load_model_from_dir(path: str) -> tuple[nn.Module, dict[str, Any]]:
         )
 
     # 结构与当前标签体系的一致性由 predict_dataset 校验（load 只负责重建）
-    model = factory.build_model(
-        architecture,
-        list(num_classes),
-        dropout=float(checkpoint.get("dropout", 0.0)),
-    )
+    if is_custom:
+        custom_model_path = checkpoint.get("custom_model_path")
+        if not isinstance(custom_model_path, str) or not custom_model_path.strip():
+            raise ValueError(
+                "custom 模型存档缺少 custom_model_path，无法重建模型结构"
+            )
+        model = factory.load_custom_model(
+            str(_resolve_custom_model_path(custom_model_path)), list(num_classes)
+        )
+        model = factory.wrap_custom_model(model, list(num_classes))
+    else:
+        model = factory.build_model(
+            architecture,
+            list(num_classes),
+            dropout=float(checkpoint.get("dropout", 0.0)),
+        )
     try:
         model.load_state_dict(model_state)
     except Exception as exc:
@@ -135,6 +174,7 @@ def load_model_from_dir(path: str) -> tuple[nn.Module, dict[str, Any]]:
     model.eval()
     meta = {
         "architecture": architecture,
+        "custom_model_path": checkpoint.get("custom_model_path"),
         "num_classes": list(num_classes),
         "category_names": list(checkpoint.get("category_names") or []),
         "dropout": float(checkpoint.get("dropout", 0.0)),
