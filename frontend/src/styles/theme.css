@@ -1,0 +1,337 @@
+/**
+ * 四诊标注训练平台 — 主题 token（高级柔和风）
+ *
+ * 唯一权威来源：frontend/DESIGN.md（第 2-7 节）。
+ * 本文件只做两件事：
+ *   1) 声明 DESIGN.md 中的全部设计 token（--ts-*）；
+ *   2) 把这些 token 映射到 Element Plus 的 CSS 变量（--el-*），
+ *      让 el-button/el-card/el-table/el-dialog 等基础件直接拾取主题。
+ * 禁止在本文件引入 DESIGN.md 之外的新色值。
+ */
+
+:root {
+  /* ============ 2.1 中性色（暖纸白阶） ============ */
+  --ts-bg-canvas: #f4f6f2;
+  --ts-surface-base: #ffffff;
+  --ts-surface-raised: #fbfdfb;
+  --ts-surface-sunken: #eef1eb;
+  --ts-text-primary: #22302a;
+  --ts-text-secondary: #59665f;
+  --ts-text-tertiary: #8d9a92;
+  --ts-text-disabled: #b7c0ba;
+  --ts-border-default: #dde3da;
+  --ts-border-subtle: #eaeeda;
+  --ts-border-strong: #cdd6cb;
+
+  /* ============ 2.2 青玉强调色（多档感知渐变） ============ */
+  --ts-jade-50: #eef6f0;
+  --ts-jade-100: #dcf0e3;
+  --ts-jade-200: #b8e0c7;
+  --ts-jade-300: #8ecba5;
+  --ts-jade-400: #5fb27f;
+  --ts-jade-500: #3d9260;
+  --ts-jade-600: #2f7a4f;
+  --ts-jade-700: #256240;
+  --ts-jade-800: #1d4d32;
+  --ts-jade-900: #163c27;
+  --ts-focus-ring: hsla(150, 42%, 41%, 0.35);
+  --ts-hover-tint: hsla(150, 25%, 50%, 0.08);
+
+  /* ============ 2.3 语义色（降饱和） ============ */
+  --ts-success: #3d9260;
+  --ts-warning: #b07d2e;
+  --ts-danger: #c25454;
+  --ts-info: #5c7f96;
+
+  /* ============ 2.4 大气层 token（仅壳层背景用） ============ */
+  --ts-atmo-jade: hsla(150, 45%, 60%, 0.1);
+  --ts-atmo-mist: hsla(95, 35%, 65%, 0.08);
+  --ts-atmo-warm: hsla(40, 30%, 80%, 0.14);
+
+  /* ============ 3. Typography ============ */
+  --ts-font-primary: 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei',
+    'Noto Sans SC', system-ui, sans-serif;
+  --ts-font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+
+  /* ============ 4. Spacing（4px 基数） ============ */
+  --ts-space-1: 4px;
+  --ts-space-2: 8px;
+  --ts-space-3: 12px;
+  --ts-space-4: 16px;
+  --ts-space-5: 20px;
+  --ts-space-6: 24px;
+  --ts-space-8: 32px;
+  --ts-space-10: 40px;
+  --ts-space-12: 48px;
+  --ts-space-16: 64px;
+
+  /* ============ 6. Motion ============ */
+  --ts-motion-micro: 120ms cubic-bezier(0, 0, 0.2, 1);
+  --ts-motion-standard: 220ms cubic-bezier(0.4, 0, 0.2, 1);
+  --ts-motion-emphasis: 480ms cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ============ 7. Depth & Surface ============ */
+  --ts-radius-xs: 6px;
+  --ts-radius-sm: 8px;
+  --ts-radius-md: 12px;
+  --ts-radius-lg: 16px;
+  --ts-radius-pill: 999px;
+
+  --ts-shadow-subtle: 0 1px 2px hsla(150, 20%, 28%, 0.05),
+    0 1px 1px hsla(150, 20%, 28%, 0.04);
+  --ts-shadow-default: 0 2px 8px hsla(150, 22%, 24%, 0.06),
+    0 1px 2px hsla(150, 22%, 24%, 0.04);
+  --ts-shadow-raised: 0 6px 16px hsla(150, 24%, 22%, 0.08),
+    0 2px 4px hsla(150, 24%, 22%, 0.05);
+  --ts-shadow-prominent: 0 12px 32px hsla(150, 26%, 20%, 0.12),
+    0 2px 8px hsla(150, 26%, 20%, 0.06);
+
+  /* 玻璃配方（多层，仅导航胶囊使用，见 DESIGN.md 7.1） */
+  --ts-glass-bg: hsla(165, 24%, 99%, 0.78);
+  --ts-glass-border: hsla(150, 22%, 45%, 0.16);
+  --ts-glass-highlight: hsla(0, 0%, 100%, 0.75);
+  --ts-glass-shadow: 0 8px 28px hsla(150, 28%, 20%, 0.1);
+
+  /* ============ Element Plus 主变量覆写 ============ */
+  /* 主色 → 青玉渐变（DESIGN.md 2.2 同一档位，不新造色值） */
+  --el-color-primary: var(--ts-jade-500);
+  --el-color-primary-light-3: var(--ts-jade-300);
+  --el-color-primary-light-5: var(--ts-jade-200);
+  --el-color-primary-light-7: var(--ts-jade-100);
+  --el-color-primary-light-8: #e6f5ea; /* jade-50 与 jade-100 之间 */
+  --el-color-primary-light-9: var(--ts-jade-50);
+  --el-color-primary-dark-2: var(--ts-jade-600);
+
+  /* 语义色（光阶为 DESIGN.md 2.3 主色的派生态调） */
+  --el-color-success: var(--ts-success);
+  --el-color-success-light-3: #77b08c;
+  --el-color-success-light-5: #9ec8ad;
+  --el-color-success-light-7: #c5e0ce;
+  --el-color-success-light-8: #d8ebde;
+  --el-color-success-light-9: #ecf5ee;
+  --el-color-success-dark-2: #2f7a4f;
+
+  --el-color-warning: var(--ts-warning);
+  --el-color-warning-light-3: #c9a05e;
+  --el-color-warning-light-5: #d9bb8b;
+  --el-color-warning-light-7: #e9d6b8;
+  --el-color-warning-light-8: #f0e3cd;
+  --el-color-warning-light-9: #f8f0e2;
+  --el-color-warning-dark-2: #8d6425;
+
+  --el-color-danger: var(--ts-danger);
+  --el-color-danger-light-3: #d18080;
+  --el-color-danger-light-5: #dda0a0;
+  --el-color-danger-light-7: #ebc0c0;
+  --el-color-danger-light-8: #f2d4d4;
+  --el-color-danger-light-9: #f9e7e7;
+  --el-color-danger-dark-2: #9b4343;
+
+  --el-color-error: var(--ts-danger);
+  --el-color-error-light-3: #d18080;
+  --el-color-error-light-5: #dda0a0;
+  --el-color-error-light-7: #ebc0c0;
+  --el-color-error-light-8: #f2d4d4;
+  --el-color-error-light-9: #f9e7e7;
+  --el-color-error-dark-2: #9b4343;
+
+  --el-color-info: var(--ts-info);
+  --el-color-info-light-3: #84a0b0;
+  --el-color-info-light-5: #a9bdc7;
+  --el-color-info-light-7: #cedadf;
+  --el-color-info-light-8: #dde5e8;
+  --el-color-info-light-9: #edf1f3;
+  --el-color-info-dark-2: #4a6678;
+
+  /* 文字 → 青墨中性阶 */
+  --el-text-color-primary: var(--ts-text-primary);
+  --el-text-color-regular: var(--ts-text-primary);
+  --el-text-color-secondary: var(--ts-text-secondary);
+  --el-text-color-placeholder: var(--ts-text-tertiary);
+  --el-text-color-disabled: var(--ts-text-disabled);
+
+  /* 描边 → 暖纸白发丝阶 */
+  --el-border-color: var(--ts-border-default);
+  --el-border-color-light: var(--ts-border-subtle);
+  --el-border-color-lighter: var(--ts-border-subtle);
+  --el-border-color-extra-light: var(--ts-bg-canvas);
+  --el-border-color-hover: var(--ts-border-strong);
+
+  /* 填充/背景 */
+  --el-fill-color: var(--ts-surface-sunken);
+  --el-fill-color-light: var(--ts-bg-canvas);
+  --el-fill-color-lighter: var(--ts-surface-raised);
+  --el-fill-color-extra-light: var(--ts-surface-raised);
+  --el-fill-color-dark: var(--ts-border-default);
+  --el-fill-color-darker: var(--ts-border-default);
+  --el-fill-color-blank: var(--ts-surface-base);
+  --el-bg-color: var(--ts-surface-base);
+  --el-bg-color-page: var(--ts-bg-canvas);
+  --el-bg-color-overlay: var(--ts-surface-base);
+  --el-mask-color: hsla(150, 20%, 12%, 0.45);
+
+  /* 圆角（DESIGN.md 7.3） */
+  --el-border-radius-base: var(--ts-radius-sm);
+  --el-border-radius-small: var(--ts-radius-xs);
+  --el-border-radius-round: var(--ts-radius-pill);
+
+  /* 阴影 → 青玉色调（DESIGN.md 7.2） */
+  --el-box-shadow: var(--ts-shadow-raised);
+  --el-box-shadow-light: var(--ts-shadow-default);
+  --el-box-shadow-lighter: var(--ts-shadow-subtle);
+  --el-box-shadow-dark: var(--ts-shadow-prominent);
+
+  /* 字体 */
+  --el-font-family: var(--ts-font-primary);
+  --el-font-size-base: 14px;
+
+  /* 表格（EP 组件级变量可在 :root 声明） */
+  --el-table-border-color: var(--ts-border-subtle);
+  --el-table-header-bg-color: var(--ts-surface-sunken);
+  --el-table-header-text-color: var(--ts-text-secondary);
+  --el-table-row-hover-bg-color: var(--ts-jade-50);
+
+  /* 组件高度与内距（整体更轻） */
+  --el-component-size-small: 26px;
+  --el-component-size-default: 32px;
+  --el-component-size-large: 40px;
+}
+
+/* ============ 基础重置（由 App.vue 迁移至全局） ============ */
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--ts-bg-canvas);
+  color: var(--ts-text-primary);
+  font-family: var(--ts-font-primary);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 可见焦点环（a11y 要求，redesign-skill） */
+:focus-visible {
+  outline: 2px solid var(--ts-jade-500);
+  outline-offset: 2px;
+}
+
+/* 数值对齐：表格单元格默认 tabular-nums */
+.el-table .cell {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============ 基础件精修（对应 DESIGN.md 第 5 节） ============ */
+
+/* 5.1 Button：主按钮 = 青玉胶囊（supabase 惯例：pill 仅主 CTA） */
+.el-button--primary {
+  border-radius: var(--ts-radius-pill);
+  font-weight: 500;
+}
+.el-button {
+  font-weight: 500;
+  transition: transform var(--ts-motion-micro), background-color var(--ts-motion-micro),
+    border-color var(--ts-motion-micro), color var(--ts-motion-micro);
+}
+.el-button:not(.is-disabled):active {
+  transform: scale(0.98);
+}
+
+/* 5.2 Card：暖白表面 + 青玉色调阴影 + 发丝描边 */
+.el-card {
+  border-radius: var(--ts-radius-md);
+  border-color: var(--ts-border-subtle);
+  box-shadow: var(--ts-shadow-default);
+  transition: box-shadow var(--ts-motion-standard), transform var(--ts-motion-standard);
+}
+.el-card.is-hover-shadow:hover,
+.el-card:not(.is-never-shadow):hover {
+  box-shadow: var(--ts-shadow-raised);
+  transform: translateY(-1px);
+}
+.el-card__header {
+  border-bottom-color: var(--ts-border-subtle);
+}
+
+/* 5.5 Dialog：大圆角 + 深阴影 */
+.el-dialog {
+  border-radius: var(--ts-radius-lg);
+  box-shadow: var(--ts-shadow-prominent);
+}
+.el-dialog__header {
+  padding-bottom: var(--ts-space-3);
+}
+
+/* 5.6 Tag / Alert / Message */
+.el-tag {
+  border-radius: var(--ts-radius-xs);
+}
+.el-message {
+  border-radius: var(--ts-radius-sm);
+  box-shadow: var(--ts-shadow-default);
+  border: 1px solid var(--ts-border-subtle);
+}
+.el-alert {
+  border-radius: var(--ts-radius-sm);
+}
+.el-message-box {
+  border-radius: var(--ts-radius-lg);
+  box-shadow: var(--ts-shadow-prominent);
+}
+
+/* 5.3 Input：focus 时青玉描边由 --el-color-primary 自动生效，仅微调 hover 手感 */
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  transition: box-shadow var(--ts-motion-micro);
+}
+
+/* 分页 / 树 / 下拉面板圆角统一 */
+.el-pagination,
+.el-pagination .el-pager li,
+.el-select-dropdown,
+.el-dropdown-menu,
+.el-picker-panel {
+  border-radius: var(--ts-radius-sm);
+}
+.el-select-dropdown__item.is-hovering,
+.el-dropdown-menu__item:not(.is-disabled):hover {
+  background-color: var(--ts-hover-tint);
+}
+
+/* 滚动条：细、中性（仅 WebKit） */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ts-border-strong);
+  border-radius: var(--ts-radius-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ts-text-tertiary);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 无障碍：降低动效偏好 → 关闭全部非必要动画 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
