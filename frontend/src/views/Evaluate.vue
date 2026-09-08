@@ -156,6 +156,7 @@ const jobs = ref([])
 const jobsLoading = ref(false)
 const jobId = ref(null)
 const loading = ref(false)
+const jobMissing = ref(false) // 查询的任务不存在（404），与「任务存在但无评估数据」区分
 
 const labelCategories = ref([]) // GET /labels → [{name, labels}]
 const evalResult = ref(null) // GET /training/eval/{job_id} → {confusion, roc}
@@ -169,6 +170,7 @@ const hasResult = computed(
     (Object.keys(confusion.value).length > 0 || Object.keys(rocData.value).length > 0),
 )
 const emptyText = computed(() => {
+  if (jobMissing.value) return '训练任务不存在或已被清理'
   const job = jobs.value.find((j) => j.job_id === jobId.value)
   if (job && (job.status === 'running' || job.status === 'created')) {
     return '训练未完成，评估暂不可用（暂无评估结果）'
@@ -222,6 +224,7 @@ async function loadEval() {
   if (!jobId.value) return
   loading.value = true
   evalResult.value = null
+  jobMissing.value = false
   try {
     const { data } = await api.get(`/training/eval/${jobId.value}`)
     evalResult.value = data || { confusion: {}, roc: {} }
@@ -231,6 +234,7 @@ async function loadEval() {
     evalResult.value = null
     const status = err?.response?.status
     if (status === 404) {
+      jobMissing.value = true
       ElMessage.error(`训练任务不存在：${jobId.value}`)
     } else if (status === 409) {
       ElMessage.info('训练未完成，评估暂不可用（暂无评估结果）')
@@ -334,7 +338,7 @@ function renderRoc(cat) {
   if (!roc || !roc.fpr || !roc.tpr) return
 
   const pal = chartPalette()
-  const auc = Number(roc.auc)
+  const auc = roc.auc == null ? NaN : Number(roc.auc)
   const points = roc.fpr.map((f, i) => [f, roc.tpr[i]])
 
   let chart = rocCharts[cat.name]

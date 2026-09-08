@@ -44,10 +44,7 @@
         </template>
 
         <div v-loading="loading" style="min-height: 200px">
-          <el-empty
-            v-if="images.length === 0 && !loading"
-            :description="hasSearched ? '无匹配图片' : '该数据集暂无图片'"
-          />
+          <el-empty v-if="images.length === 0 && !loading" :description="emptyDescription" />
           <div v-else-if="images.length > 0" class="browse">
             <div class="viewer">
               <div class="image-well">
@@ -56,7 +53,8 @@
               <div class="controls">
                 <el-button :disabled="currentIndex <= 0" @click="prev">上一张</el-button>
                 <el-slider
-                  v-model="currentIndex"
+                  :model-value="currentIndex"
+                  @change="goTo"
                   :min="0"
                   :max="images.length - 1"
                   :show-tooltip="false"
@@ -79,22 +77,26 @@
               <template v-else>
                 <div class="panel-head">
                   <span class="panel-title">标注面板</span>
-                  <el-button
-                    size="small"
-                    :type="quality === '合格' ? 'success' : 'default'"
-                    @click="toggleQuality"
-                  >
-                    质量：{{ qualityText }}
-                  </el-button>
+                  <el-select v-model="quality" size="small" :disabled="!labelsReady"
+                    aria-label="图片质量" @change="scheduleSave">
+                    <el-option label="待质检" value="" />
+                    <el-option label="合格" value="合格" />
+                    <el-option label="不合格" value="不合格" />
+                  </el-select>
                 </div>
                 <div class="hint">1–4 定位类别 · ←/→ 翻图 · Q 质量 · S 保存</div>
+                <el-alert v-if="!labelsReady" title="标注尚未加载，请稍候或重新加载"
+                  type="info" :closable="false" />
+                <el-button v-if="!labelsReady" @click="loadLabels">重新加载标注</el-button>
                 <el-tree
                   ref="treeRef"
                   class="label-tree"
                   :data="treeData"
+                  :inert="!labelsReady"
                   node-key="key"
                   show-checkbox
                   check-strictly
+                  :check-on-click-leaf="false"
                   default-expand-all
                   :expand-on-click-node="false"
                   @check="onCheck"
@@ -114,7 +116,9 @@
                 <div class="panel-foot">
                   <span class="save-state" :class="saveState">{{ saveStateText }}</span>
                   <span class="panel-foot-spacer"></span>
-                  <el-button size="small" type="primary" @click="manualSave">保存</el-button>
+                  <el-button size="small" type="primary" :disabled="!labelsReady" @click="manualSave">
+                    {{ saveState === 'conflict' ? '核对冲突' : '保存 / 重试' }}
+                  </el-button>
                   <el-button size="small" type="danger" @click="onDelete">删除</el-button>
                 </div>
               </template>
@@ -129,9 +133,10 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
+import { createAnnotationQueue } from '../store/annotationQueue'
 
 const route = useRoute()
 const router = useRouter()
@@ -141,7 +146,14 @@ const currentIndex = ref(0)
 const query = ref('')
 const loading = ref(false)
 const hasSearched = ref(false)
+const loadError = ref('')
 const datasets = ref([])
+
+// 空态文案：数据集不存在（404 + 错误含「不存在」）→ 专属提示；否则按搜索态回退
+const emptyDescription = computed(() => {
+  if (loadError.value) return '数据集不存在或已被删除，请重新选择数据集'
+  return hasSearched.value ? '无匹配图片' : '该数据集暂无图片'
+})
 
 const datasetId = computed(() => {
   const raw = Number(route.query.dataset)
@@ -154,9 +166,9 @@ const selectedDataset = computed({
   set: (val) => onSelectDataset(val),
 })
 
-function onSelectDataset(val) {
+async function onSelectDataset(val) {
   if (val === datasetId.value) return
-  flushPendingNow() // 切走前把旧图待写快照落盘（写入旧数据集）
+  if (!(await flushPendingNow())) return
   if (val === null || val === undefined || val === '') {
     router.replace({ query: {} })
   } else {
@@ -176,6 +188,7 @@ const imageSrc = computed(() =>
 const treeRef = ref(null)
 const treeData = ref([])
 const quality = ref('')
+const labelsReady = ref(false)
 const saveState = ref('') // '' | dirty | saving | saved | failed
 const selectedSummary = ref([]) // [{category, name}]
 const activeCategory = ref(-1) // 数字键 1–4 定位的分类头索引
@@ -184,12 +197,23 @@ const keyMap = new Map() // tree key -> {category, name}
 const nameKeyMap = new Map() // `${category}\u0000${name}` -> tree key
 
 let saveTimer = null
-let pendingSave = null // {filename, payload} 快照（翻页时仍写回旧图）
 let suppressTreeEvents = false
 let radioBusy = false
 let labelsReqId = 0
+let imagesReqId = 0
 
-const qualityText = computed(() => (quality.value === '合格' ? '合格' : '未标记'))
+const queue = createAnnotationQueue({
+  storage: window.localStorage,
+  send: async (id, filename, payload) => {
+    const { data } = await api.put(`/datasets/${id}/image/${encodeURIComponent(filename)}/labels`, payload)
+    return data
+  },
+  onChange: entry => {
+    if (entry.datasetId === datasetId.value && entry.filename === currentImage.value) {
+      saveState.value = entry.state
+    }
+  },
+})
 
 const saveStateText = computed(
   () =>
@@ -198,11 +222,13 @@ const saveStateText = computed(
       saving: '保存中…',
       saved: '已保存',
       failed: '保存失败',
+      conflict: '版本冲突，草稿已保留',
     })[saveState.value] || '',
 )
 
 function errText(err) {
-  return err?.response?.data?.detail || err?.message || '请求失败'
+  const detail = err?.response?.data?.detail
+  return detail?.message || detail || err?.message || '请求失败'
 }
 
 // ---------------------------------------------------------------- 标签树
@@ -240,7 +266,7 @@ function refreshSelected() {
 
 // radio-like：每 category 单选；父节点 checkbox 惰性（点击即回弹）
 function onCheck(data) {
-  if (suppressTreeEvents || radioBusy) return
+  if (suppressTreeEvents || radioBusy || !labelsReady.value) return
   const node = treeRef.value && treeRef.value.getNode(data.key)
   if (!node) return
   radioBusy = true
@@ -263,10 +289,11 @@ function onCheck(data) {
 }
 
 function onNodeClick(data) {
-  if (suppressTreeEvents) return
+  if (suppressTreeEvents || !labelsReady.value) return
   const node = treeRef.value && treeRef.value.getNode(data.key)
   if (node && node.isLeaf) {
     treeRef.value.setChecked(data.key, !node.checked, false)
+    onCheck(data)
   }
 }
 
@@ -284,26 +311,32 @@ function setCheckedKeysSilent(keys) {
 
 async function loadLabels() {
   const filename = currentImage.value
+  const id = datasetId.value
+  const reqId = ++labelsReqId
+  labelsReady.value = false
   saveState.value = ''
   quality.value = ''
   refreshSelected()
   if (!filename || !treeData.value.length) return
   await nextTick() // 等待 el-tree 完成挂载（首次图片加载时 watcher 先于 DOM 更新触发）
-  if (!treeRef.value) return
+  if (reqId !== labelsReqId || !treeRef.value) return
   setCheckedKeysSilent([])
 
-  const reqId = ++labelsReqId
   try {
     const { data } = await api.get(
-      `/datasets/${datasetId.value}/image/${encodeURIComponent(filename)}/labels`,
+      `/datasets/${id}/image/${encodeURIComponent(filename)}/labels`,
     )
-    if (reqId !== labelsReqId) return // 过期响应丢弃
-    const labels = Array.isArray(data.labels) ? data.labels : []
+    if (reqId !== labelsReqId || id !== datasetId.value || filename !== currentImage.value) return
+    const entry = queue.load(id, filename, data)
+    const displayed = entry.pending || data
+    const labels = Array.isArray(displayed.labels) ? displayed.labels : []
     const keys = labels.map((l) => labelKeyFor(l.category, l.name)).filter(Boolean)
     setCheckedKeysSilent(keys)
-    quality.value = data.quality === '合格' ? '合格' : ''
-  } catch {
-    // 无 XML（404）等 → 视为未标注，保持空
+    quality.value = displayed.quality || ''
+    labelsReady.value = true
+    if (entry.pending) ElMessage.warning('已恢复本地草稿，请核对后保存')
+  } catch (err) {
+    if (reqId === labelsReqId) ElMessage.error(`读取标注失败：${errText(err)}`)
   } finally {
     if (reqId === labelsReqId) refreshSelected()
   }
@@ -311,55 +344,57 @@ async function loadLabels() {
 
 function scheduleSave() {
   refreshSelected()
-  if (!currentImage.value) return
-  pendingSave = { filename: currentImage.value, payload: currentPayload() }
-  saveState.value = 'dirty'
-  clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => {
-    saveTimer = null
-    const snap = pendingSave
-    pendingSave = null
-    flushSave(snap)
-  }, 300)
-}
-
-async function flushSave(snapshot) {
-  if (!snapshot || !datasetId.value) return
-  saveState.value = 'saving'
+  if (!currentImage.value || !labelsReady.value) return
   try {
-    await api.put(
-      `/datasets/${datasetId.value}/image/${encodeURIComponent(snapshot.filename)}/labels`,
-      snapshot.payload,
-    )
-    if (snapshot.filename === currentImage.value) saveState.value = 'saved'
-  } catch (err) {
-    ElMessage.error(`自动保存失败（${snapshot.filename}）：${errText(err)}`)
-    if (snapshot.filename === currentImage.value) saveState.value = 'failed'
-  }
-}
-
-// 翻页前把待写快照立即发出（fire-and-forget，不阻塞导航，REQ-6.4-2）
-function flushPendingNow() {
-  if (saveTimer) {
+    const entry = queue.edit(datasetId.value, currentImage.value, currentPayload())
     clearTimeout(saveTimer)
-    saveTimer = null
+    saveTimer = setTimeout(() => {
+      saveTimer = null
+      queue.flush(entry).then(ok => {
+        if (!ok) ElMessage.error(`保存失败（${entry.filename}）：${errText(entry.error)}`)
+      })
+    }, 300)
+  } catch (err) {
+    saveState.value = 'failed'
+    ElMessage.error(`草稿保存失败：${errText(err)}`)
   }
-  const snap = pendingSave
-  pendingSave = null
-  if (snap) flushSave(snap)
 }
 
-function manualSave() {
-  if (!currentImage.value) return
-  const pendingForCurrent = pendingSave && pendingSave.filename === currentImage.value
-  flushPendingNow()
-  if (!pendingForCurrent) {
-    flushSave({ filename: currentImage.value, payload: currentPayload() })
+async function flushPendingNow() {
+  clearTimeout(saveTimer)
+  saveTimer = null
+  const entry = queue.get(datasetId.value, currentImage.value)
+  const ok = await queue.flush(entry)
+  if (!ok) ElMessage.warning('请先保存或处理当前图片的冲突；草稿仍保留在本机')
+  return ok
+}
+
+async function manualSave() {
+  if (!currentImage.value || !labelsReady.value) return
+  clearTimeout(saveTimer)
+  saveTimer = null
+  const entry = queue.get(datasetId.value, currentImage.value)
+  if (!entry) return
+  let confirmedRevision
+  if (entry.state === 'conflict') {
+    const current = entry.error?.response?.data?.detail?.current
+    if (!current?.revision) return
+    const summarize = value => `${(value?.labels || []).map(l => l.category + ':' + l.name).join('，') || '无标签'}；质量：${value?.quality || '待质检'}`
+    try {
+      await ElMessageBox.confirm(
+        `服务器：${summarize(current)}。我的草稿：${summarize(entry.pending)}。确认用我的草稿替换此版本？`,
+        '核对标注冲突', { confirmButtonText: '采用我的草稿', cancelButtonText: '保留草稿继续核对', type: 'warning' },
+      )
+      confirmedRevision = current.revision
+    } catch { return }
   }
+  if (!entry.pending) queue.edit(datasetId.value, currentImage.value, currentPayload())
+  const ok = await queue.retry(entry, confirmedRevision)
+  if (!ok) ElMessage.error(`保存失败：${errText(entry.error)}`)
 }
 
 function toggleQuality() {
-  if (!currentImage.value) return
+  if (!currentImage.value || !labelsReady.value) return
   quality.value = quality.value === '合格' ? '' : '合格'
   scheduleSave()
 }
@@ -369,6 +404,7 @@ function toggleQuality() {
 async function onDelete() {
   const filename = currentImage.value
   if (!filename) return
+  if (!(await flushPendingNow())) return
   try {
     await ElMessageBox.confirm(
       `确定删除「${filename}」？图片文件与标注 XML 将一并删除，不可恢复。`,
@@ -377,13 +413,6 @@ async function onDelete() {
     )
   } catch {
     return
-  }
-  if (pendingSave && pendingSave.filename === filename) {
-    pendingSave = null
-    if (saveTimer) {
-      clearTimeout(saveTimer)
-      saveTimer = null
-    }
   }
   try {
     await api.delete(`/datasets/${datasetId.value}/image/${encodeURIComponent(filename)}`)
@@ -459,50 +488,68 @@ async function loadDatasets() {
 
 async function loadImages() {
   if (!datasetId.value) return
+  const id = datasetId.value
+  const requestId = ++imagesReqId
+  labelsReady.value = false
   loading.value = true
   try {
-    const { data } = await api.get(`/datasets/${datasetId.value}/images`)
+    const { data } = await api.get(`/datasets/${id}/images`)
+    if (requestId !== imagesReqId || id !== datasetId.value) return
     images.value = data.images || []
+    loadError.value = ''
     currentIndex.value = 0
     hasSearched.value = false
+    await loadLabels()
   } catch (err) {
+    if (requestId !== imagesReqId) return
     ElMessage.error(`加载图片列表失败：${errText(err)}`)
     images.value = []
+    loadError.value =
+      err?.response?.status === 404 && errText(err).includes('不存在') ? errText(err) : ''
   } finally {
-    loading.value = false
+    if (requestId === imagesReqId) loading.value = false
   }
 }
 
 async function onSearch() {
   if (!datasetId.value) return
+  if (!(await flushPendingNow())) return
   const q = query.value.trim()
+  const id = datasetId.value
+  const requestId = ++imagesReqId
+  labelsReady.value = false
   loading.value = true
   try {
-    const { data } = await api.get(`/datasets/${datasetId.value}/images/search`, {
+    const { data } = await api.get(`/datasets/${id}/images/search`, {
       params: { q },
     })
+    if (requestId !== imagesReqId || id !== datasetId.value) return
     images.value = data.images || []
     currentIndex.value = 0
     hasSearched.value = true
+    await loadLabels()
   } catch (err) {
+    if (requestId !== imagesReqId) return
     ElMessage.error(`搜索失败：${errText(err)}`)
   } finally {
-    loading.value = false
+    if (requestId === imagesReqId) loading.value = false
   }
 }
 
-function onReset() {
+async function onReset() {
+  if (!(await flushPendingNow())) return
+  loadError.value = ''
   query.value = ''
   loadImages()
 }
 
-function prev() {
-  if (currentIndex.value > 0) currentIndex.value -= 1
+async function goTo(index) {
+  if (!(await flushPendingNow())) return
+  currentIndex.value = Math.max(0, Math.min(index, images.value.length - 1))
 }
 
-function next() {
-  if (currentIndex.value < images.value.length - 1) currentIndex.value += 1
-}
+function prev() { return goTo(currentIndex.value - 1) }
+function next() { return goTo(currentIndex.value + 1) }
 
 async function loadCategories() {
   try {
@@ -516,6 +563,7 @@ async function loadCategories() {
 
 watch(datasetId, (val, old) => {
   if (val !== old) {
+    loadError.value = ''
     if (!val) {
       // 清空选择：回到未选择数据集状态
       images.value = []
@@ -523,7 +571,6 @@ watch(datasetId, (val, old) => {
       query.value = ''
       hasSearched.value = false
       saveState.value = ''
-      pendingSave = null
       if (saveTimer) {
         clearTimeout(saveTimer)
         saveTimer = null
@@ -534,20 +581,31 @@ watch(datasetId, (val, old) => {
 })
 
 watch(currentImage, (val, old) => {
-  if (val !== old && old) flushPendingNow()
   loadLabels()
 })
+
+onBeforeRouteLeave(() => flushPendingNow())
+onBeforeRouteUpdate(() => flushPendingNow())
+
+function onBeforeUnload(event) {
+  if (queue.hasPending()) {
+    event.preventDefault()
+    event.returnValue = ''
+  }
+}
 
 onMounted(() => {
   loadDatasets()
   loadImages()
   loadCategories()
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('beforeunload', onBeforeUnload)
 })
 
 onBeforeUnmount(() => {
   flushPendingNow()
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('beforeunload', onBeforeUnload)
 })
 </script>
 
