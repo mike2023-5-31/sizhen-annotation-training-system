@@ -81,4 +81,4 @@ def read_labels(dataset_id: int, filename: str) -> dict[str, Any]:
     xml_path = image_path.with_suffix(".xml")
     if not xml_path.is_file():
         raise ValueError(f"图片 {filename} 无标注 XML")
-    return xml_io.read_xml(xml_path)
+    return xml_io.read_versioned_xml(xml_path)

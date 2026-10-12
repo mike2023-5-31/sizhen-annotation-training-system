@@ -10,20 +10,20 @@
   逐类别（舌/面/脉/声音）计算子标签混淆矩阵 + one-vs-rest micro 平均 ROC/AUC
   （``compute_eval(job_id)``，缓存于 job；无验证集 → 空 dict 不报错）。
 - 数据管线：torch Dataset 读取每张 ``Record`` 图片 + 同名 XML（``xml_io.read_xml``），
-  标签映射为各分类头类别下标（未标注 category → 下标 0 =「正常/无」，锁定决策 1）；
+  标签映射为各分类头类别下标；缺失属性为 -100，不参与损失或指标；
   训练集应用所选增强（RandomHorizontalFlip / RandomRotation / ColorJitter /
   RandomCrop → Resize(224)），验证集不增强（REQ-6.10-2）。
 - 设备：0 卡 → CPU FP32；1 卡 → 单卡；>1 卡 → DataParallel；GPU 上按配置启用
   ``torch.cuda.amp`` FP16 混合精度（GradScaler），无 GPU 自动降级 FP32
   （REQ-6.8，锁定决策 9）。
-- 损失：CrossEntropy / FocalLoss 作用于**全部 4 个分类头**并对各头损失求和
+- 损失：CrossEntropy / FocalLoss 仅作用于有效标签，按样本-任务对平均
   （REQ-6.9-6）；优化器 SGD/Adam/AdamW（REQ-6.9-4）；Dropout 传入 ``build_model``
   （REQ-6.9-5）。
 - Checkpoint（T13 产出、T17 消费）：dict ``{"model_state", "optimizer_state",
   "scheduler_state", "epoch", "best_metric", "config", "architecture",
   "num_classes", "category_names", "dropout"}``；每轮保存 latest、指标提升时保存
   best 到 ``config.MODEL_DIR``（REQ-6.14-3）。
-- ``best_metric`` = 4 个分类头 macro val_acc 的算术均值（锁定决策 3），
+- ``best_metric`` = 有验证真值的分类头 macro val_acc 算术均值，
   best 存档在提升时覆盖保存（REQ-6.14-2）。
 
 约束（锁定决策 6 / 6.11-3）：训练启动前同步校验全部所选数据集每一张标注 XML 的
@@ -33,8 +33,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import math
+import os
 import random
 import re
+import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -64,6 +68,7 @@ from app.services import xml_io
 _TARGET_SIZE = 224          # 各头共享主干要求的固定输入尺寸
 _CROP_SIZE = 196            # RandomCrop 后统一 Resize(224)（crop → resize 语义）
 _DEFAULT_LR = 1e-3
+_MISSING_TARGET = -100
 
 # 训练引擎支持的结构（锁定决策 8：结构读取仅保证 ResNet18/50）
 _SUPPORTED_BACKBONES = {"resnet18", "resnet50"}
@@ -164,7 +169,7 @@ def normalize_config(raw: Optional[dict[str, Any]]) -> dict[str, Any]:
         lr = float(raw.get("lr", _DEFAULT_LR))
     except (TypeError, ValueError):
         lr = 0.0
-    if not lr > 0:
+    if not math.isfinite(lr) or not lr > 0:
         raise ValueError(f"lr 必须为正数，得到 {raw.get('lr')!r}")
     cfg["lr"] = lr
 
@@ -353,7 +358,7 @@ class _AnnotationDataset(Dataset):
     """图片 + 4 头标签向量数据集。
 
     ``items``：``(image_path, target_vector)``，vector 长度 4（与 CATEGORIES 顺序
-    一致），未标注 category 取 0（=「正常/无」）。
+    一致），未标注 category 取 -100（缺失，不参与监督）。
     """
 
     def __init__(self, items: list[tuple[str, list[int]]], transform: Any) -> None:
@@ -370,19 +375,19 @@ class _AnnotationDataset(Dataset):
 
 
 def _target_vector(image_path: str, filename: str) -> list[int]:
-    """读同名 XML → 4 头标签下标向量；XML 缺失/未标注 → 全 0（「正常/无」）。
+    """读同名 XML → 标签下标向量；XML 缺失/未标注 → -100。
 
     未知 (category, label) → ValueError 硬失败（锁定决策 6）。
     """
     xml_path = Path(image_path).with_suffix(".xml")
     if not xml_path.is_file():
-        return [0] * len(_CATEGORY_ORDER)
+        return [_MISSING_TARGET] * len(_CATEGORY_ORDER)
     try:
         data = xml_io.read_xml(xml_path)
     except Exception as exc:
         raise ValueError(f"标注 XML 解析失败：{filename}（{exc}）") from exc
 
-    vector = [0] * len(_CATEGORY_ORDER)
+    vector = [_MISSING_TARGET] * len(_CATEGORY_ORDER)
     for label in data.get("labels") or []:
         category = str(label.get("category") or "")
         name = str(label.get("name") or "")
@@ -426,7 +431,18 @@ def _prepare_data(dataset_ids: list[int]) -> list[tuple[str, list[int]]]:
         image_path = str(rec.image_path)
         if not Path(image_path).is_file():
             raise ValueError(f"图片文件缺失：{rec.filename}")
-        items.append((image_path, _target_vector(image_path, rec.filename)))
+        target = _target_vector(image_path, rec.filename)
+        # 未观察的属性不是正常；完全无监督的图片不进入分类训练。
+        if all(value == _MISSING_TARGET for value in target):
+            continue
+        annotation = xml_io.read_xml(Path(image_path).with_suffix(".xml"))
+        if annotation.get("quality") != "合格":
+            continue
+        if annotation.get("annotation_source") == "model":
+            continue
+        items.append((image_path, target))
+    if not items:
+        raise ValueError("没有质量合格且具有有效人工标签的训练样本，请先完成标注和质检")
     return items
 
 
@@ -505,7 +521,7 @@ def _build_scheduler(
 # ---------------------------------------------------------------------------
 
 
-def _macro_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> tuple[float, list[float]]:
+def _macro_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> tuple[Optional[float], list[float]]:
     """单头 macro accuracy：各类别正确率（仅统计出现过的类别）的算术均值。"""
     preds = logits.argmax(dim=1)
     per_class: list[float] = []
@@ -514,7 +530,7 @@ def _macro_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> tuple[float,
         count = int(mask.sum())
         if count > 0:
             per_class.append(float((preds[mask] == cls).float().mean()))
-    mean = float(sum(per_class) / len(per_class)) if per_class else 0.0
+    mean = float(sum(per_class) / len(per_class)) if per_class else None
     return mean, per_class
 
 
@@ -560,7 +576,16 @@ def _save_checkpoint(
         "category_names": list(category_names),
         "dropout": cfg["dropout"],
     }
-    torch.save(checkpoint, path)
+    # 发布存档前完整写入并刷盘；失败不能毁掉上一份可恢复存档。
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            torch.save(checkpoint, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _load_resume_payload(
@@ -782,10 +807,10 @@ class TrainManager:
             status = job["status"]
             cfg = copy.deepcopy(job["config"])
             items = job.get("_items")
-            checkpoint_path = job.get("checkpoint_latest")
+            checkpoint_path = job.get("checkpoint_best")
         if status in {"created", "running"}:
             return None
-        if not checkpoint_path or not items:
+        if not checkpoint_path or not Path(checkpoint_path).is_file() or not items:
             return {"confusion": {}, "roc": {}}
         try:
             result = _eval_from_checkpoint(cfg, items, str(checkpoint_path))
@@ -940,8 +965,8 @@ class TrainManager:
                 val_loss, val_acc, val_per_head = self._eval_epoch(
                     model, val_loader, loss_fn, device, use_amp, category_names
                 )
-            else:  # 无验证集 → 以训练指标兜底（REQ-6.13-4 精神：不报错）
-                val_loss, val_acc, val_per_head = float("nan"), train_acc, train_per_head
+            else:
+                val_loss, val_acc, val_per_head = None, None, [None] * len(category_names)
 
             scheduler.step()
             metric = {
@@ -952,48 +977,34 @@ class TrainManager:
                 "val_loss": val_loss,
                 "val_acc": val_acc,
                 "val_acc_per_head": val_per_head,
+                "train_valid_per_head": [sum(items[j][1][i] != _MISSING_TARGET for j in train_set) for i in range(len(category_names))],
+                "val_valid_per_head": [sum(items[j][1][i] != _MISSING_TARGET for j in val_set) for i in range(len(category_names))],
                 "lr": float(optimizer.param_groups[0]["lr"]),
             }
             self._append_metric(job, metric)
 
-            # 每轮存 latest（REQ-6.14-3）
-            _save_checkpoint(
-                latest_path, base_model, optimizer, scheduler, epoch,
-                best_metric, cfg, list(num_classes), category_names,
-            )
-            # best = 4 头 macro val_acc 均值最大时覆盖保存（REQ-6.14-2，锁定决策 3）
-            if best_metric is None or val_acc > best_metric:
+            # 无有效验证指标时不创建 best；均值仅包含有真值的任务头。
+            if val_acc is not None and (best_metric is None or val_acc > best_metric):
                 best_metric = val_acc
                 _save_checkpoint(
                     best_path, base_model, optimizer, scheduler, epoch,
                     best_metric, cfg, list(num_classes), category_names,
                 )
+            # latest 必须携带本轮更新后的 best-so-far，而不是滞后一轮。
+            _save_checkpoint(
+                latest_path, base_model, optimizer, scheduler, epoch,
+                best_metric, cfg, list(num_classes), category_names,
+            )
 
         if stop_event.is_set():
-            # 优雅停止：落一份 latest 供断点续训
-            try:
-                _save_checkpoint(
-                    latest_path, base_model, optimizer, scheduler,
-                    max(epoch, start_epoch), best_metric, cfg,
-                    list(num_classes), category_names,
-                )
-            except Exception:
-                pass
+            # 只从已完整结束的epoch恢复；不能把半轮参数保存成该轮已完成。
             self._update(job, status="stopped", finished_at=_utcnow_iso())
         else:
             # T14（REQ-6.13）：完成后对验证集计算混淆矩阵 + one-vs-rest ROC，
             # 与状态更新同锁原子落盘；无验证集 → 空 dict 不报错（REQ-6.13-4）。
             eval_result: dict[str, Any] = {"confusion": {}, "roc": {}}
-            if val_loader is not None:
-                try:
-                    collected = _collect_val_probs(
-                        model, val_loader, device, use_amp, category_names
-                    )
-                    eval_result = _compute_eval_from_probs(
-                        collected, category_names, list(num_classes)
-                    )
-                except Exception:
-                    eval_result = {"confusion": {}, "roc": {}}
+            if val_loader is not None and best_path.is_file():
+                eval_result = _eval_from_checkpoint(cfg, items, str(best_path))
             self._update(
                 job,
                 eval=eval_result,
@@ -1029,22 +1040,21 @@ class TrainManager:
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
                 outs = model(images)
-                loss = sum(
-                    loss_fn(outs[name], targets[:, i])
-                    for i, name in enumerate(category_names)
-                )
+                loss, valid_count = _masked_loss(outs, targets, loss_fn, category_names)
+            if loss is None:
+                continue
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
-            total_loss += float(loss.detach()) * images.size(0)
-            count += images.size(0)
+            total_loss += float(loss.detach()) * valid_count
+            count += valid_count
             with torch.no_grad():
                 for i, name in enumerate(category_names):
                     logits_acc[name].append(outs[name].detach().cpu())
                     targets_acc[name].append(targets[:, i].cpu())
 
-        mean_loss = total_loss / count if count else float("nan")
+        mean_loss = total_loss / count if count else None
         return mean_loss, *_mean_macro_acc(logits_acc, targets_acc, category_names)
 
     def _eval_epoch(
@@ -1068,27 +1078,42 @@ class TrainManager:
                 targets = targets.to(device)
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     outs = model(images)
-                    loss = sum(
-                        loss_fn(outs[name], targets[:, i])
-                        for i, name in enumerate(category_names)
-                    )
-                total_loss += float(loss.detach()) * images.size(0)
-                count += images.size(0)
+                    loss, valid_count = _masked_loss(outs, targets, loss_fn, category_names)
+                if loss is None:
+                    continue
+                total_loss += float(loss.detach()) * valid_count
+                count += valid_count
                 for i, name in enumerate(category_names):
                     logits_acc[name].append(outs[name].detach().cpu())
                     targets_acc[name].append(targets[:, i].cpu())
 
-        mean_loss = total_loss / count if count else float("nan")
+        mean_loss = total_loss / count if count else None
         return mean_loss, *_mean_macro_acc(logits_acc, targets_acc, category_names)
+
+
+def _masked_loss(
+    outputs: dict[str, torch.Tensor], targets: torch.Tensor,
+    loss_fn: nn.Module, category_names: list[str],
+) -> tuple[Optional[torch.Tensor], int]:
+    """按有效的样本-任务对平均；缺失任务没有 loss 或梯度贡献。"""
+    weighted: list[torch.Tensor] = []
+    total = 0
+    for index, name in enumerate(category_names):
+        mask = targets[:, index] != _MISSING_TARGET
+        count = int(mask.sum())
+        if count:
+            weighted.append(loss_fn(outputs[name][mask], targets[:, index][mask]) * count)
+            total += count
+    return (sum(weighted) / total, total) if total else (None, 0)
 
 
 def _mean_macro_acc(
     logits_acc: dict[str, list[torch.Tensor]],
     targets_acc: dict[str, list[torch.Tensor]],
     category_names: list[str],
-) -> tuple[float, list[float]]:
+) -> tuple[Optional[float], list[Optional[float]]]:
     """4 头 macro acc 列表 + 算术均值（= best_metric 判据，锁定决策 3）。"""
-    per_head: list[float] = []
+    per_head: list[Optional[float]] = []
     for name in category_names:
         if logits_acc[name]:
             logits = torch.cat(logits_acc[name])
@@ -1096,8 +1121,9 @@ def _mean_macro_acc(
             head_acc, _ = _macro_accuracy(logits, targets)
             per_head.append(head_acc)
         else:
-            per_head.append(0.0)
-    mean = float(sum(per_head) / len(per_head)) if per_head else 0.0
+            per_head.append(None)
+    observed = [value for value in per_head if value is not None]
+    mean = float(sum(observed) / len(observed)) if observed else None
     return mean, per_head
 
 
@@ -1128,10 +1154,13 @@ def _collect_val_probs(
             with torch.amp.autocast("cuda", enabled=use_amp):
                 outs = model(images)
             for i, name in enumerate(category_names):
+                mask = targets[:, i] != _MISSING_TARGET
+                if not mask.any():
+                    continue
                 prob_acc[name].append(
-                    F.softmax(outs[name], dim=1).detach().float().cpu()
+                    F.softmax(outs[name][mask], dim=1).detach().float().cpu()
                 )
-                targ_acc[name].append(targets[:, i].cpu())
+                targ_acc[name].append(targets[:, i][mask].cpu())
     return {
         name: (
             torch.cat(prob_acc[name]).numpy() if prob_acc[name] else None,
@@ -1143,23 +1172,21 @@ def _collect_val_probs(
 
 def _one_vs_rest_roc(
     y_true: Any, probs: Any, n_classes: int
-) -> tuple[list[float], list[float], float]:
+) -> tuple[list[float], list[float], Optional[float]]:
     """单类别多分类头的 one-vs-rest micro 平均 ROC（REQ-6.13-2）。
 
     子标签二值化（label_binarize）后与 softmax 概率按列展平，得到该类别一条
     聚合 ROC 曲线（= 各子标签 one-vs-rest 的 micro 平均）与 AUC 标量。
     """
     from sklearn.metrics import auc, roc_curve
-    from sklearn.preprocessing import label_binarize
+    import numpy as np
 
-    y_bin = label_binarize(y_true, classes=list(range(n_classes)))
-    if y_bin.ndim == 1:
-        y_bin = y_bin.reshape(-1, 1)
+    if n_classes < 2 or np.unique(y_true).size < 2:
+        return [], [], None
+    # label_binarize 对二分类只产一列，与两列 softmax 不匹配。
+    y_bin = np.eye(n_classes, dtype=int)[y_true]
     fpr, tpr, _ = roc_curve(y_bin.ravel(), probs.reshape(-1).ravel())
-    try:
-        auc_val = float(auc(fpr, tpr))
-    except Exception:
-        auc_val = 0.0
+    auc_val = float(auc(fpr, tpr))
     return [float(x) for x in fpr], [float(x) for x in tpr], auc_val
 
 
@@ -1174,20 +1201,44 @@ def _compute_eval_from_probs(
         ``{"confusion": {类别: [[int,...]...]}, "roc": {类别: {"fpr", "tpr", "auc"}}}``；
         某类别无验证样本时该类别缺席（不伪造数据）。
     """
-    from sklearn.metrics import confusion_matrix
+    from sklearn.metrics import confusion_matrix, precision_recall_fscore_support, roc_curve, auc
+    import numpy as np
 
     confusion: dict[str, list[list[int]]] = {}
     roc: dict[str, dict[str, Any]] = {}
+    details: dict[str, Any] = {}
     for i, name in enumerate(category_names):
         probs, targets = collected.get(name, (None, None))
         if probs is None or targets is None or targets.size == 0:
+            details[name] = {"valid_count": 0, "reason": "无有效验证标签", "classes": []}
             continue
         n_cls = int(num_classes[i])
         matrix = confusion_matrix(targets, probs.argmax(axis=1), labels=list(range(n_cls)))
         confusion[name] = [[int(v) for v in row] for row in matrix.tolist()]
         fpr, tpr, auc_val = _one_vs_rest_roc(targets, probs, n_cls)
-        roc[name] = {"fpr": fpr, "tpr": tpr, "auc": auc_val}
-    return {"confusion": confusion, "roc": roc}
+        roc[name] = {"fpr": fpr, "tpr": tpr, "auc": auc_val,
+                     "reason": "验证集仅含一种已观察类别" if auc_val is None else None}
+        precision, recall, f1, support = precision_recall_fscore_support(
+            targets, probs.argmax(axis=1), labels=list(range(n_cls)), zero_division=0,
+        )
+        classes = []
+        for index in range(n_cls):
+            positive = targets == index
+            class_roc = {"fpr": [], "tpr": [], "auc": None, "reason": "缺少正例或负例"}
+            if positive.any() and (~positive).any():
+                cfpr, ctpr, _ = roc_curve(positive, probs[:, index])
+                class_roc = {"fpr": cfpr.tolist(), "tpr": ctpr.tolist(),
+                             "auc": float(auc(cfpr, ctpr)), "reason": None}
+            classes.append({"index": index, "support": int(support[index]),
+                            "precision": float(precision[index]),
+                            "recall": float(recall[index]) if support[index] else None,
+                            "f1": float(f1[index]) if support[index] else None,
+                            "roc": class_roc})
+        present = support > 0
+        details[name] = {"valid_count": int(targets.size), "classes": classes,
+                         "macro_f1_observed": float(np.mean(f1[present])),
+                         "covered_class_count": int(present.sum()), "total_class_count": n_cls}
+    return {"confusion": confusion, "roc": roc, "details": details}
 
 
 def _eval_from_checkpoint(
@@ -1213,7 +1264,11 @@ def _eval_from_checkpoint(
         num_workers=0,
     )
     collected = _collect_val_probs(model, loader, device, False, _CATEGORY_NAMES)
-    return _compute_eval_from_probs(collected, _CATEGORY_NAMES, list(num_classes))
+    result = _compute_eval_from_probs(collected, _CATEGORY_NAMES, list(num_classes_per_head()))
+    result["checkpoint"] = {"path": str(checkpoint_path),
+                            "sha256": hashlib.sha256(Path(checkpoint_path).read_bytes()).hexdigest(),
+                            "epoch": payload["epoch"]}
+    return result
 
 
 # ---------------------------------------------------------------------------

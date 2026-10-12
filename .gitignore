@@ -9,6 +9,8 @@ data/uploads/
 __pycache__/
 *.pyc
 .pytest_cache/
+.test-tmp*/
+.test-runs/
 
 # --- Node ---
 node_modules/
@@ -23,3 +25,21 @@ dist/
 
 # --- Env / secrets ---
 .env
+
+# --- Local data (backups never committed) ---
+data/backups/
+
+# --- Agent / tooling caches (never committed) ---
+.omo/
+.playwright-mcp/
+.firecrawl/
+.codegraph/
+$null
+
+# --- docs: 含姓名/学号/导师等个人信息的附件不入库（只保留 .md/.html）---
+docs/**/*.pdf
+docs/**/*.docx
+docs/**/*.txt
+docs/**/qa/*.png
+docs/**/qa/fill_forms.py
+docs/**/qa/final_validation.json

@@ -636,9 +636,9 @@ function updateCharts(job) {
   const valLoss = metrics.map((m) =>
     Number.isFinite(m.val_loss) ? m.val_loss : null,
   )
-  const trainAcc = metrics.map((m) => Number(m.train_acc) * 100)
+  const trainAcc = metrics.map((m) => Number.isFinite(m.train_acc) ? m.train_acc * 100 : null)
   const valAcc = metrics.map((m) =>
-    Number.isFinite(Number(m.val_acc)) ? Number(m.val_acc) * 100 : null,
+    Number.isFinite(m.val_acc) ? m.val_acc * 100 : null,
   )
 
   if (lossChart) {

@@ -17,7 +17,7 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Query
 from pydantic import BaseModel, Field
 
 from app.labels_config import CATEGORIES
@@ -30,7 +30,7 @@ _LABELS_BY_CATEGORY: dict[str, set[str]] = {
 }
 
 # 「不合格」仅经导入 XML 带入，标注页不直接设置（REQ-6.4-4）
-_ALLOWED_QUALITY = ("合格", "")
+_ALLOWED_QUALITY = ("合格", "不合格", "")
 
 
 @router.get("/labels")
@@ -52,6 +52,7 @@ class SaveLabelsIn(BaseModel):
 
     labels: list[LabelIn] = Field(default_factory=list)
     quality: str = ""
+    expected_revision: str | None = None
 
 
 def _validate_payload(payload: SaveLabelsIn) -> list[dict[str, str]]:
@@ -59,7 +60,7 @@ def _validate_payload(payload: SaveLabelsIn) -> list[dict[str, str]]:
     if payload.quality not in _ALLOWED_QUALITY:
         raise HTTPException(
             status_code=400,
-            detail="quality 仅支持「合格」或空字符串（「不合格」仅经导入 XML 带入）",
+            detail="quality 仅支持「合格」「不合格」或空字符串（待质检）",
         )
     if len(payload.labels) > 4:
         raise HTTPException(status_code=400, detail="labels 至多 4 个（每 category 一个）")
@@ -82,13 +83,27 @@ def _validate_payload(payload: SaveLabelsIn) -> list[dict[str, str]]:
 
 
 @router.put("/datasets/{dataset_id}/image/{filename}/labels")
-def save_labels(dataset_id: int, filename: str, payload: SaveLabelsIn) -> dict:
+def save_labels(dataset_id: int, filename: str, payload: SaveLabelsIn, request: Request) -> dict:
     """原子写回当前图片标注（labels + quality），返回写盘后的完整 dict。"""
     labels = _validate_payload(payload)
+    if payload.expected_revision is None:
+        raise HTTPException(status_code=428, detail="请先读取当前标注版本后保存")
     try:
-        return annotation_service.save_labels(dataset_id, filename, labels, payload.quality)
+        return annotation_service.save_labels(dataset_id, filename, labels, payload.quality,
+                                              expected_revision=payload.expected_revision,
+                                              actor_id=getattr(request.state, "user", {}).get("id"))
+    except annotation_service.AnnotationConflict as exc:
+        raise HTTPException(status_code=409, detail={"message": str(exc), "current": exc.current})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/datasets/{dataset_id}/image/{filename}/history")
+def history(dataset_id: int, filename: str, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):
+    try:
+        return annotation_service.list_edits(dataset_id, filename, offset, limit)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
 
 
 @router.delete("/datasets/{dataset_id}/image/{filename}")

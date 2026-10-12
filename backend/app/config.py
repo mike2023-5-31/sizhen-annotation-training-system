@@ -59,6 +59,20 @@ CORS_ORIGINS = [
 ]
 
 
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(256 * 1024 * 1024)))
+MAX_ARCHIVE_BYTES = int(os.getenv("MAX_ARCHIVE_BYTES", str(2 * 1024 * 1024 * 1024)))
+MAX_ARCHIVE_ENTRIES = int(os.getenv("MAX_ARCHIVE_ENTRIES", "10000"))
+MAX_ARCHIVE_RATIO = float(os.getenv("MAX_ARCHIVE_RATIO", "200"))
+MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))
+MAX_XML_BYTES = int(os.getenv("MAX_XML_BYTES", str(2 * 1024 * 1024)))
+
+SESSION_SECONDS = int(os.getenv("SESSION_SECONDS", "28800"))
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
+AUTH_ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.getenv(
+    "AUTH_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+).split(",") if o.strip() and o.strip() != "*"]
+
+
 def ensure_dirs() -> None:
     """确保数据目录树存在（StaticFiles 挂载要求目录已存在）。"""
     for d in (DATA_DIR, DATASETS_DIR, MODEL_DIR, EXPORT_DIR, UPLOAD_DIR):

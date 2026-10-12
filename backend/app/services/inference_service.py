@@ -331,6 +331,8 @@ def generate_preannotation_xml(dataset_id: int, model: nn.Module) -> int:
             continue  # 已有人工标注：不覆盖
 
         data: dict[str, Any] = {
+            **(existing or {}),
+            "annotation_source": "model",
             "folder": (existing or {}).get("folder") or dataset_name,
             "filename": (existing or {}).get("filename") or filename,
             "path": (existing or {}).get("path") or f"{dataset_id}/{filename}",

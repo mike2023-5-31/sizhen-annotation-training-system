@@ -125,7 +125,7 @@ def test_compare_missing_onnx_raises(tmp_path: Path, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_convert_foreign_pth_rejected(dirs, monkeypatch) -> None:
+def test_convert_foreign_pth_rejected(dirs, monkeypatch, login_admin) -> None:
     """第三方权重（无 architecture/num_classes 键）POST /convert → 400。"""
     model_dir, _ = dirs
     torch.save(
@@ -133,18 +133,20 @@ def test_convert_foreign_pth_rejected(dirs, monkeypatch) -> None:
         model_dir / "foreign.pth",
     )
     with TestClient(app) as client:
+        login_admin(client)
         resp = client.post("/api/onnx/convert", json={"model_path": "foreign.pth"})
     assert resp.status_code == 400
     assert "该模型不支持一键转换" in resp.json()["detail"]
 
 
-def test_download_roundtrip_and_traversal_guard(dirs, monkeypatch) -> None:
+def test_download_roundtrip_and_traversal_guard(dirs, monkeypatch, login_admin) -> None:
     """转换 → 下载内容与产物逐字节一致；越界文件名 → 400（REQ-6.21-1 / NF-7.4）。"""
     model_dir, export_dir = dirs
     model = _build_resnet18(monkeypatch)
     _save_checkpoint(model_dir / "best.pth", model)
 
     with TestClient(app) as client:
+        login_admin(client)
         conv = client.post("/api/onnx/convert", json={"model_path": "best.pth"})
         assert conv.status_code == 200
         onnx_name = conv.json()["onnx_name"]

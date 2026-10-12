@@ -44,7 +44,7 @@
               </linearGradient>
             </defs>
           </svg>
-          <span class="nav-brand-text">四诊标注训练平台</span>
+          <span class="nav-brand-text">标注训练与AI模型训练平台</span>
         </router-link>
 
         <div class="nav-links">
@@ -63,6 +63,9 @@
 
     <main class="app-main">
       <div class="app-page">
+        <el-alert v-if="auth.loaded && !auth.user && route.name !== 'login'" title="登录已失效，本地标注草稿仍保留。" type="warning" :closable="false">
+          <el-button @click="returnToLogin">重新登录</el-button>
+        </el-alert>
         <router-view />
       </div>
     </main>
@@ -70,6 +73,10 @@
 </template>
 
 <script setup>
+import { useRoute } from 'vue-router'
+import { auth } from './store/auth'
+const route = useRoute()
+function returnToLogin() { window.location.assign('/login') }
 // 顶部玻璃导航 + 路由出口。激活态由 router-link-exact-active 自动标记。
 const navItems = [
   { path: '/datasets', label: '数据集管理' },
@@ -78,6 +85,7 @@ const navItems = [
   { path: '/evaluate', label: '评估可视化' },
   { path: '/infer', label: '批量推理' },
   { path: '/onnx', label: '模型转换' },
+  { path: '/account', label: '账号' },
 ]
 </script>
 

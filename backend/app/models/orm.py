@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, String, JSON, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -58,3 +58,37 @@ class Record(Base):
     )
 
     dataset: Mapped[Dataset] = relationship(back_populates="records")
+
+
+class AnnotationEdit(Base):
+    """标注修改历史，业务删除后仍保留审计；不把未知操作者伪造为用户。"""
+
+    __tablename__ = "annotation_edits"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    record_id: Mapped[int] = mapped_column(index=True)
+    dataset_id: Mapped[int] = mapped_column(index=True)
+    actor_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    previous_revision: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[str] = mapped_column(String(64))
+    before: Mapped[dict] = mapped_column(JSON)
+    after: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(256))
+    role: Mapped[str] = mapped_column(String(16), default="member")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    failed_logins: Mapped[int] = mapped_column(default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class LoginSession(Base):
+    __tablename__ = "login_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)

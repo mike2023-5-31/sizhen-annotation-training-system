@@ -125,8 +125,9 @@ def db(tmp_path: Path, monkeypatch):
 
 
 @pytest.fixture
-def client(db, model_dir):
+def client(db, model_dir, login_admin):
     with TestClient(app) as test_client:
+        login_admin(test_client)
         yield test_client
 
 
@@ -146,6 +147,10 @@ def _add_dataset(
         for fn in images:
             path = imgs_dir / fn
             Image.new("RGB", (64, 64), (110, 70, 40)).save(path)
+            from app.services import xml_io
+            xml_io.write_xml(path.with_suffix(".xml"), {
+                "quality": "合格", "labels": [{"category": "舌", "name": "正常/无"}],
+            })
             db.add(
                 Record(
                     dataset_id=ds_id,

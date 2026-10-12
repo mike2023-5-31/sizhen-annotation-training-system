@@ -190,7 +190,8 @@ def test_full_pipeline_e2e(tmp_path: Path, e2e_env) -> None:
 
     ds1 = dataset_service.create_dataset("e2e-ds1")
     result1 = import_service.import_zip(ds1.id, zip_bytes)
-    assert result1 == {"imported": len(_IMAGES), "skipped": [], "errors": []}
+    assert result1["imported"] == len(_IMAGES)
+    assert not result1["errors"] and not result1["skipped"]
     recs1 = _records_by_filename(session_factory, ds1.id)
     assert sorted(recs1) == sorted(_IMAGES)
     for fn in _IMAGES:  # 图片/XML 均落盘于 DATASETS_DIR/<id>/
@@ -225,7 +226,8 @@ def test_full_pipeline_e2e(tmp_path: Path, e2e_env) -> None:
 
     ds2 = dataset_service.create_dataset("e2e-ds2")
     result2 = import_service.import_zip(ds2.id, exported)
-    assert result2 == {"imported": len(_IMAGES), "skipped": [], "errors": []}
+    assert result2["imported"] == len(_IMAGES)
+    assert not result2["errors"] and not result2["skipped"]
     recs2 = _records_by_filename(session_factory, ds2.id)
     assert sorted(recs2) == sorted(_IMAGES)
     # 重新取 ds1 记录（阶段 2 save_labels 已镜像更新 quality，旧快照已过期）
@@ -271,14 +273,17 @@ def test_full_pipeline_e2e(tmp_path: Path, e2e_env) -> None:
 
     # -- 阶段 5：训练评估（混淆矩阵 + ROC）→ 4 个 category 全覆盖 ----------
     eval_report = train_service.train_manager.compute_eval(job_id)
+    # seed=0下4个有效样本的验证集为img2、img0；未知属性不补正常。
     assert set(eval_report["confusion"]) == set(CATEGORY_NAMES)
     assert set(eval_report["roc"]) == set(CATEGORY_NAMES)
+    expected_counts = {"舌": 1, "面": 2, "脉": 2, "声音": 1}
     for name in CATEGORY_NAMES:
         matrix = eval_report["confusion"][name]
+        assert sum(sum(row) for row in matrix) == expected_counts[name]
         assert matrix and all(len(row) == len(matrix) for row in matrix)
         roc = eval_report["roc"][name]
         assert set(roc) >= {"fpr", "tpr", "auc"}
-        assert 0.0 <= roc["auc"] <= 1.0
+        assert roc["auc"] is None  # 每个头只有一种已观察标签，不伪造ROC
 
     # -- 阶段 6：load_model_from_dir + predict_dataset → 每图 4 个预测 ------
     model, meta = inference_service.load_model_from_dir(str(latest_path))

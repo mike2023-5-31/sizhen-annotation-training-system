@@ -78,13 +78,14 @@
                 <div class="panel-head">
                   <span class="panel-title">标注面板</span>
                   <el-select v-model="quality" size="small" :disabled="!labelsReady"
-                    aria-label="图片质量" @change="scheduleSave">
+                    aria-label="图片质量" placeholder="待质检" @change="scheduleSave">
                     <el-option label="待质检" value="" />
                     <el-option label="合格" value="合格" />
                     <el-option label="不合格" value="不合格" />
                   </el-select>
                 </div>
                 <div class="hint">1–4 定位类别 · ←/→ 翻图 · Q 质量 · S 保存</div>
+                <el-button size="small" @click="openHistory">修改记录</el-button>
                 <el-alert v-if="!labelsReady" title="标注尚未加载，请稍候或重新加载"
                   type="info" :closable="false" />
                 <el-button v-if="!labelsReady" @click="loadLabels">重新加载标注</el-button>
@@ -128,6 +129,18 @@
       </el-card>
     </template>
     <el-empty v-else description="请选择要标注的数据集" />
+    <el-drawer v-model="historyVisible" title="标注修改记录" size="60%" append-to-body>
+      <p>{{ historyFilename }}</p>
+      <el-alert v-if="historyError" :title="historyError" type="error" :closable="false" />
+      <el-table :data="historyItems" v-loading="historyLoading">
+        <el-table-column label="修改人"><template #default="{ row }">{{ row.username || '未记录' }}</template></el-table-column>
+        <el-table-column label="时间"><template #default="{ row }">{{ new Date(row.created_at).toLocaleString() }}</template></el-table-column>
+        <el-table-column label="修改前"><template #default="{ row }">{{ historySummary(row.before) }}</template></el-table-column>
+        <el-table-column label="修改后"><template #default="{ row }">{{ historySummary(row.after) }}</template></el-table-column>
+      </el-table>
+      <el-button :disabled="!historyOffset || historyLoading" @click="loadHistory(historyOffset - 50)">上一页</el-button>
+      <el-button :disabled="!historyMore || historyLoading" @click="loadHistory(historyOffset + 50)">下一页</el-button>
+    </el-drawer>
   </div>
 </template>
 
@@ -137,6 +150,7 @@ import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vu
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
 import { createAnnotationQueue } from '../store/annotationQueue'
+import { auth } from '../store/auth'
 
 const route = useRoute()
 const router = useRouter()
@@ -192,6 +206,29 @@ const labelsReady = ref(false)
 const saveState = ref('') // '' | dirty | saving | saved | failed
 const selectedSummary = ref([]) // [{category, name}]
 const activeCategory = ref(-1) // 数字键 1–4 定位的分类头索引
+const historyVisible = ref(false), historyItems = ref([]), historyError = ref(''), historyLoading = ref(false)
+const historyFilename = ref(''), historyDataset = ref(null), historyOffset = ref(0), historyMore = ref(false)
+function historySummary(value) {
+  return `${(value.labels || []).map(l => l.category + '：' + l.name).join('，') || '无标签'}；${value.quality || '待质检'}`
+}
+async function openHistory() {
+  if (!(await flushPendingNow())) return
+  historyFilename.value = currentImage.value
+  historyDataset.value = datasetId.value
+  historyVisible.value = true
+  await loadHistory(0)
+}
+async function loadHistory(offset) {
+  historyLoading.value = true
+  historyError.value = ''
+  try {
+    const { data } = await api.get(`/datasets/${historyDataset.value}/image/${encodeURIComponent(historyFilename.value)}/history`, { params: { offset } })
+    historyItems.value = data.items
+    historyMore.value = data.has_more
+    historyOffset.value = offset
+  } catch (err) { historyError.value = errText(err) }
+  finally { historyLoading.value = false }
+}
 
 const keyMap = new Map() // tree key -> {category, name}
 const nameKeyMap = new Map() // `${category}\u0000${name}` -> tree key
@@ -202,10 +239,13 @@ let radioBusy = false
 let labelsReqId = 0
 let imagesReqId = 0
 
+const annotationOwner = auth.user?.id
 const queue = createAnnotationQueue({
+  userId: auth.user?.id,
   storage: window.localStorage,
   send: async (id, filename, payload) => {
-    const { data } = await api.put(`/datasets/${id}/image/${encodeURIComponent(filename)}/labels`, payload)
+    const { data } = await api.put(`/datasets/${id}/image/${encodeURIComponent(filename)}/labels`, payload,
+      { annotationOwner: annotationOwner })
     return data
   },
   onChange: entry => {
@@ -439,6 +479,7 @@ function focusCategory(index) {
 }
 
 function onKeydown(e) {
+  if (historyVisible.value) return
   if (!datasetId.value || images.value.length === 0) return
   const t = e.target
   const tag = t && t.tagName
@@ -753,9 +794,15 @@ onBeforeUnmount(() => {
 }
 
 .panel-title {
+  flex-shrink: 0;
   font-size: 16px;
   font-weight: 600;
   color: var(--ts-text-primary);
+}
+
+.panel-head .el-select {
+  flex: 1;
+  min-width: 0;
 }
 
 .hint {

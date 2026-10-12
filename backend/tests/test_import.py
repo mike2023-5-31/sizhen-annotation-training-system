@@ -1,296 +1,197 @@
-"""ZIP 导入服务测试（T7，需求 6.2a）：白名单过滤 / 配对落盘 / 异常与安全。
-
-覆盖：
-- 白名单扩展名（.jpg .jpeg .png .bmp .gif，大小写不敏感）过滤；
-- 非白名单文件完全忽略（不提取、不建记录）；
-- 图片无同名 XML → 计入 skipped，不落盘、不建记录；
-- 损坏 ZIP → BadZipFile 上抛；XML 解析失败 → 计入 errors；
-- Zip Slip：仅取 basename，杜绝目录穿越；
-- 记录 quality 取自 XML、timestamp 优先 XML 否则回退文件 mtime。
-"""
-
-from __future__ import annotations
-
+"""v2 ZIP契约：使用真实图片验证安全、配对、未知标签和数据保护。"""
 import io
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from zipfile import BadZipFile
 
 import pytest
+from PIL import Image
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app import config
 from app.db import Base
 from app.models.orm import Dataset, Record
-from app.services import import_service, xml_io
-
-
-# ---------------------------------------------------------------------------
-# 工具 / fixture
-# ---------------------------------------------------------------------------
+from app.services import import_service as importer, xml_io
 
 
 @pytest.fixture
-def import_env(tmp_path: Path, monkeypatch):
-    """临时 SQLite + 临时 DATASETS_DIR/UPLOAD_DIR，替换 import_service 依赖。"""
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'test_import.db'}",
-        connect_args={"check_same_thread": False},
-    )
+def env(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    monkeypatch.setattr(import_service, "SessionLocal", factory)
-
-    datasets_dir = tmp_path / "datasets"
-    upload_dir = tmp_path / "uploads"
-    datasets_dir.mkdir()
-    upload_dir.mkdir()
-    # import_service 经 `config.DATASETS_DIR / config.UPLOAD_DIR` 运行时取值 → 打补丁生效
-    monkeypatch.setattr(config, "DATASETS_DIR", datasets_dir)
-    monkeypatch.setattr(config, "UPLOAD_DIR", upload_dir)
-    return SimpleNamespace(
-        factory=factory,
-        datasets_dir=datasets_dir,
-        upload_dir=upload_dir,
-        tmp_path=tmp_path,
-    )
-
-
-def _create_dataset(factory, name: str) -> int:
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    monkeypatch.setattr(importer, "SessionLocal", factory)
+    monkeypatch.setattr(config, "DATASETS_DIR", tmp_path / "datasets")
+    monkeypatch.setattr(config, "UPLOAD_DIR", tmp_path / "uploads")
     with factory() as db:
-        ds = Dataset(name=name)
-        db.add(ds)
+        dataset = Dataset(name="test")
+        db.add(dataset)
         db.commit()
-        db.refresh(ds)
-        return ds.id
+        dataset_id = dataset.id
+    yield SimpleNamespace(factory=factory, dataset_id=dataset_id, root=config.DATASETS_DIR / str(dataset_id))
+    engine.dispose()
 
 
-def _xml_bytes(tmp_path: Path, filename: str, quality: str = "合格") -> bytes:
-    """用公共 xml_io.write_xml 生成合法标注 XML，返回字节（供 zip 打包）。"""
-    build_dir = tmp_path / "build"
-    build_dir.mkdir(exist_ok=True)
-    xml_path = build_dir / f"{filename}.xml"
-    xml_io.write_xml(
-        xml_path,
-        {
-            "folder": "import-test",
-            "filename": filename,
-            "path": filename,
-            "size": {"width": 64, "height": 64, "depth": 3},
-            "quality": quality,
-            "labels": [{"category": "舌", "name": "舌苔黄", "confidence": 1.0}],
-        },
-    )
-    return xml_path.read_bytes()
+def picture(fmt="PNG", color=(90, 50, 30)):
+    output = io.BytesIO()
+    Image.new("RGB", (16, 12), color).save(output, format=fmt)
+    return output.getvalue()
 
 
-def _make_zip(entries: dict[str, tuple[bytes, tuple[int, int, int, int, int, int]]]) -> bytes:
-    """entries: {arcname: (data, date_time)} → ZIP 字节。"""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for arcname, (data, date_time) in entries.items():
-            info = zipfile.ZipInfo(arcname, date_time=date_time)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            zf.writestr(info, data)
-    return buf.getvalue()
+def archive(entries):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, value in entries.items():
+            z.writestr(name, value)
+    return output.getvalue()
 
 
-def _records(factory, dataset_id: int) -> list[Record]:
-    with factory() as db:
-        return list(db.scalars(select(Record).where(Record.dataset_id == dataset_id)).all())
+def annotation(quality="合格", name="舌苔黄"):
+    return (f"<annotation><quality>{quality}</quality><labels><label>"
+            f"<category>舌</category><name>{name}</name><confidence>1.0</confidence>"
+            "</label></labels></annotation>").encode()
 
 
-def _filenames(factory, dataset_id: int) -> list[str]:
-    return [r.filename for r in _records(factory, dataset_id)]
+def records(env):
+    with env.factory() as db:
+        return list(db.scalars(select(Record).where(Record.dataset_id == env.dataset_id)).all())
 
 
-_DT = (2024, 5, 6, 7, 8, 10)
+def test_all_image_formats_and_missing_xml(env):
+    entries = {f"image{i}.{ext}": picture(fmt, (i * 25, 50, 30))
+               for i, (ext, fmt) in enumerate([("jpg", "JPEG"), ("jpeg", "JPEG"), ("PNG", "PNG"), ("bmp", "BMP"), ("gif", "GIF")])}
+    entries["notes.txt"] = b"ignored"
+    result = importer.import_zip(env.dataset_id, archive(entries))
+    assert result["imported"] == result["initialized"] == 5
+    assert not result["errors"] and not result["skipped"]
+    for record in records(env):
+        data = xml_io.read_xml(Path(record.image_path).with_suffix(".xml"))
+        assert data["labels"] == [] and data["quality"] == ""
+        assert data["size"]["width"] == 16
+        assert data["sample_id"]
+        assert data["timestamp_source"] == "archive_mtime"
 
 
-# ---------------------------------------------------------------------------
-# 白名单过滤 + 无 XML 跳过（需求 6.2a）
-# ---------------------------------------------------------------------------
-
-
-def test_whitelist_filtering_and_skips(import_env) -> None:
-    """白名单（含大小写）图片与同名 XML 配对导入；无 XML 图片跳过；其余文件忽略。"""
-    ds_id = _create_dataset(import_env.factory, "wl")
-    zip_bytes = _make_zip(
-        {
-            "a.jpg": (b"\xff\xd8fake-jpg", _DT),
-            "a.xml": (_xml_bytes(import_env.tmp_path, "a.jpg"), _DT),
-            "B.PNG": (b"\x89PNGfake", _DT),
-            "b.xml": (_xml_bytes(import_env.tmp_path, "B.PNG"), _DT),
-            "c.jpeg": (b"fake-jpeg", _DT),
-            "c.xml": (_xml_bytes(import_env.tmp_path, "c.jpeg"), _DT),
-            "d.gif": (b"GIF89afake", _DT),        # 图片但无 XML → skipped
-            "e.bmp": (b"BMfake", _DT),            # 图片但无 XML → skipped
-            "notes.txt": (b"hello", _DT),         # 非图片 → 忽略
-            "sub/doc.docx": (b"docx", _DT),       # 子目录非图片 → 忽略
-            "readme.md": (b"# md", _DT),          # 非图片 → 忽略
-            "noext": (b"raw", _DT),               # 无扩展名 → 忽略
-        }
-    )
-
-    result = import_service.import_zip(ds_id, zip_bytes)
-
-    assert result["imported"] == 3
-    assert result["skipped"] == ["d.gif", "e.bmp"]
-    assert result["errors"] == []
-    assert sorted(_filenames(import_env.factory, ds_id)) == ["B.PNG", "a.jpg", "c.jpeg"]
-
-    # 数据集目录只落盘配对成功的图片 + 同名 XML，非白名单文件一律不落盘
-    ds_dir = import_env.datasets_dir / str(ds_id)
-    assert sorted(p.name for p in ds_dir.iterdir()) == [
-        "B.PNG", "a.jpg", "a.xml", "b.xml", "c.jpeg", "c.xml",
-    ]
-    assert not (ds_dir / "notes.txt").exists()
-    assert not (ds_dir / "d.gif").exists()
-
-
-def test_image_without_xml_skipped_no_record(import_env) -> None:
-    """仅图片无 XML → imported=0、计入 skipped，不落盘、不建记录（需求 6.2a）。"""
-    ds_id = _create_dataset(import_env.factory, "no-xml")
-    zip_bytes = _make_zip({"only.jpg": (b"fake", _DT)})
-
-    result = import_service.import_zip(ds_id, zip_bytes)
-
-    assert result["imported"] == 0
-    assert result["skipped"] == ["only.jpg"]
-    assert result["errors"] == []
-    assert _records(import_env.factory, ds_id) == []
-    assert not (import_env.datasets_dir / str(ds_id) / "only.jpg").exists()
-
-
-# ---------------------------------------------------------------------------
-# 异常路径：损坏 ZIP / XML 解析失败
-# ---------------------------------------------------------------------------
-
-
-def test_corrupted_zip_raises_badzipfile(import_env) -> None:
-    """非 ZIP 字节 → BadZipFile 上抛，且不产生任何落盘/记录。"""
-    ds_id = _create_dataset(import_env.factory, "corrupt")
-    with pytest.raises(BadZipFile):
-        import_service.import_zip(ds_id, b"definitely not a zip archive at all")
-    assert _records(import_env.factory, ds_id) == []
-    assert list((import_env.datasets_dir / str(ds_id)).iterdir()) == []
-
-
-def test_xml_parse_failure_reported(import_env) -> None:
-    """同名 XML 解析失败 → 计入 errors、不建记录；同包内正常配对不受影响。"""
-    ds_id = _create_dataset(import_env.factory, "badxml")
-    zip_bytes = _make_zip(
-        {
-            "ok.jpg": (b"fake", _DT),
-            "ok.xml": (_xml_bytes(import_env.tmp_path, "ok.jpg"), _DT),
-            "bad.png": (b"fake", _DT),
-            "bad.xml": (b"<<<not xml>>>", _DT),
-        }
-    )
-
-    result = import_service.import_zip(ds_id, zip_bytes)
-
+def test_corrupt_image_and_xml_are_isolated(env):
+    result = importer.import_zip(env.dataset_id, archive({
+        "ok.jpg": picture("JPEG"), "ok.xml": annotation(),
+        "bad.png": b"fake image", "broken.png": picture(color=(11, 12, 13)),
+        "broken.xml": b"<<<invalid>>>",
+    }))
     assert result["imported"] == 1
-    assert result["skipped"] == []
-    assert len(result["errors"]) == 1
-    assert "XML 解析失败" in result["errors"][0]
-    assert sorted(_filenames(import_env.factory, ds_id)) == ["ok.jpg"]
-    ds_dir = import_env.datasets_dir / str(ds_id)
-    assert not (ds_dir / "bad.png").exists()
+    assert len(result["errors"]) == 2
+    assert [r.filename for r in records(env)] == ["ok.jpg"]
+    assert (env.root / "ok.xml").read_bytes() == annotation()
 
 
-# ---------------------------------------------------------------------------
-# Zip Slip：仅取 basename（安全约束）
-# ---------------------------------------------------------------------------
+def test_relative_pairing_same_basename_and_platform_export_layout(env):
+    result = importer.import_zip(env.dataset_id, archive({
+        "a/image.png": picture(), "a/image.xml": annotation(),
+        "b/image.png": picture(color=(2, 3, 4)), "b/image.xml": annotation("不合格"),
+        "images/third.png": picture(color=(5, 6, 7)), "labels/third.xml": annotation(),
+    }))
+    assert result["imported"] == 3 and not result["errors"]
+    assert len({r.filename for r in records(env)}) == 3
+    assert sorted(r.quality for r in records(env)) == ["不合格", "合格", "合格"]
+    assert len(list(env.root.glob("*.xml"))) == 3
 
 
-def test_zip_slip_basename_only(import_env) -> None:
-    """`../evil.jpg` 与 `deep/nested/pic.jpg` 均按 basename 落盘，无目录穿越。"""
-    ds_id = _create_dataset(import_env.factory, "slip")
-    zip_bytes = _make_zip(
-        {
-            "../evil.jpg": (b"evil", _DT),
-            "../evil.xml": (_xml_bytes(import_env.tmp_path, "evil.jpg"), _DT),
-            "deep/nested/pic.jpg": (b"pic", _DT),
-            "deep/nested/pic.xml": (_xml_bytes(import_env.tmp_path, "pic.jpg"), _DT),
-        }
-    )
-
-    result = import_service.import_zip(ds_id, zip_bytes)
-
-    assert result["imported"] == 2
-    assert result["errors"] == []
-    assert sorted(_filenames(import_env.factory, ds_id)) == ["evil.jpg", "pic.jpg"]
-
-    ds_dir = import_env.datasets_dir / str(ds_id)
-    # 全部落在数据集目录内（basename），绝无逃逸到上层
-    assert (ds_dir / "evil.jpg").is_file()
-    assert (ds_dir / "pic.jpg").is_file()
-    assert not (import_env.tmp_path / "evil.jpg").exists()
-    assert not (import_env.datasets_dir / "evil.jpg").exists()
-    # 解压临时目录已整体删除：UPLOAD_DIR 无孤儿文件
-    assert list(import_env.upload_dir.iterdir()) == []
-    # 记录 image_path 均在数据集目录内
-    for rec in _records(import_env.factory, ds_id):
-        assert Path(rec.image_path).parent == ds_dir.resolve()
+def test_shared_xml_is_not_guessed(env):
+    result = importer.import_zip(env.dataset_id, archive({
+        "a.jpg": picture("JPEG"), "a.png": picture(), "a.xml": annotation(),
+    }))
+    assert result["imported"] == 0 and len(result["errors"]) == 2
+    assert records(env) == []
 
 
-# ---------------------------------------------------------------------------
-# quality / timestamp 落库
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("path", ["../evil.png", "/evil.png", "C:/evil.png", r"..\evil.png", "NUL.png"])
+def test_unsafe_path_rejected_without_artifacts(env, path):
+    with pytest.raises(importer.ImportValidationError):
+        importer.import_zip(env.dataset_id, archive({path: picture()}))
+    assert records(env) == []
+    assert not list(env.root.iterdir())
+    assert not list(config.UPLOAD_DIR.iterdir())
 
 
-def test_records_quality_and_timestamp_fallback(import_env) -> None:
-    """quality 取自 XML；XML 无 timestamp → 回退解压文件 mtime（zip 条目时间）。"""
-    ds_id = _create_dataset(import_env.factory, "meta")
-    dt = (2023, 1, 2, 3, 4, 6)
-    zip_bytes = _make_zip(
-        {
-            "q_ok.jpg": (b"ok", dt),
-            "q_ok.xml": (_xml_bytes(import_env.tmp_path, "q_ok.jpg", quality="合格"), dt),
-            "q_bad.jpg": (b"bad", dt),
-            "q_bad.xml": (
-                _xml_bytes(import_env.tmp_path, "q_bad.jpg", quality="不合格"), dt,
-            ),
-        }
-    )
-
-    result = import_service.import_zip(ds_id, zip_bytes)
-    assert result["imported"] == 2
-
-    by_name = {r.filename: r for r in _records(import_env.factory, ds_id)}
-    assert by_name["q_ok.jpg"].quality == "合格"
-    assert by_name["q_bad.jpg"].quality == "不合格"
-    # 回退路径：timestamp = 落盘文件 mtime（zip 条目 date_time 经 copy2 保留）
-    for rec in by_name.values():
-        assert rec.timestamp is not None
-        assert rec.timestamp == datetime.fromtimestamp(Path(rec.image_path).stat().st_mtime)
-        assert rec.timestamp == datetime(2023, 1, 2, 3, 4, 6)
-        assert Path(rec.image_path).is_file()
+def test_duplicate_content_and_conflicting_annotations_never_overwrite(env):
+    first = archive({"a.png": picture(), "a.xml": annotation()})
+    assert importer.import_zip(env.dataset_id, first)["imported"] == 1
+    before = (env.root / "a.xml").read_bytes()
+    assert importer.import_zip(env.dataset_id, first)["duplicates"] == 1
+    result = importer.import_zip(env.dataset_id, archive({"a.png": picture(), "a.xml": annotation("不合格")}))
+    assert result["imported"] == 0 and "标注冲突" in result["errors"][0]
+    assert (env.root / "a.xml").read_bytes() == before
+    assert len(records(env)) == 1
 
 
-def test_xml_timestamp_takes_priority(import_env, monkeypatch) -> None:
-    """XML 提供 timestamp → 优先采用，不回退文件 mtime（前向兼容分支）。"""
-    ds_id = _create_dataset(import_env.factory, "ts-priority")
-    real_read_xml = xml_io.read_xml
-
-    def _fake_read_xml(path):
-        data = real_read_xml(path)
-        data["timestamp"] = "2022-03-04T05:06:07"
-        return data
-
-    monkeypatch.setattr(import_service.xml_io, "read_xml", _fake_read_xml)
-    zip_bytes = _make_zip(
-        {
-            "t.jpg": (b"fake", (2020, 1, 1, 0, 0, 0)),  # 故意与 XML 时间不同
-            "t.xml": (_xml_bytes(import_env.tmp_path, "t.jpg"), (2020, 1, 1, 0, 0, 0)),
-        }
-    )
-
-    result = import_service.import_zip(ds_id, zip_bytes)
+def test_different_content_same_name_does_not_overwrite(env):
+    original = picture()
+    importer.import_zip(env.dataset_id, archive({"a.png": original}))
+    result = importer.import_zip(env.dataset_id, archive({"a.png": picture(color=(5, 5, 5))}))
     assert result["imported"] == 1
-    rec = _records(import_env.factory, ds_id)[0]
-    assert rec.timestamp == datetime(2022, 3, 4, 5, 6, 7)
+    assert (env.root / "a.png").read_bytes() == original
+    assert len(records(env)) == 2
+
+
+def test_concurrent_reimports_are_idempotent(env):
+    data = archive({"a.png": picture()})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: importer.import_zip(env.dataset_id, data), range(2)))
+    assert sum(r["imported"] for r in results) == 1
+    assert sum(r["duplicates"] for r in results) == 1
+    assert len(records(env)) == 1
+
+
+def test_rollback_cleans_only_new_files(env, monkeypatch):
+    importer.import_zip(env.dataset_id, archive({"old.png": picture()}))
+    before = (env.root / "old.png").read_bytes()
+    def fail(_):
+        raise RuntimeError("disk/DB failure")
+    monkeypatch.setattr(env.factory.class_, "commit", fail)
+    with pytest.raises(RuntimeError):
+        importer.import_zip(env.dataset_id, archive({"new.png": picture(color=(1, 4, 9))}))
+    assert (env.root / "old.png").read_bytes() == before
+    assert not (env.root / "new.png").exists()
+    assert not (env.root / "new.xml").exists()
+    assert len(records(env)) == 1
+
+
+@pytest.mark.parametrize("limit,value,pattern", [
+    ("MAX_UPLOAD_BYTES", 1, "上传"), ("MAX_ARCHIVE_BYTES", 1, "解压"),
+    ("MAX_ARCHIVE_ENTRIES", 0, "条目"), ("MAX_ARCHIVE_RATIO", 0.1, "压缩比"),
+])
+def test_archive_limits(env, monkeypatch, limit, value, pattern):
+    monkeypatch.setattr(config, limit, value)
+    with pytest.raises(importer.ImportValidationError, match=pattern):
+        importer.import_zip(env.dataset_id, archive({"a.png": picture()}))
+    assert records(env) == []
+
+
+def test_xml_entities_unknown_labels_and_pixel_limit(env, monkeypatch):
+    result = importer.import_zip(env.dataset_id, archive({
+        "a.png": picture(),
+        "a.xml": b'<!DOCTYPE annotation [<!ENTITY x "bad">]><annotation>&x;</annotation>',
+        "b.png": picture(color=(1, 1, 1)), "b.xml": annotation(name="unknown"),
+    }))
+    assert result["imported"] == 0 and len(result["errors"]) == 2
+    monkeypatch.setattr(config, "MAX_IMAGE_PIXELS", 1)
+    assert importer.import_zip(env.dataset_id, archive({"c.png": picture()}))["imported"] == 0
+
+
+def test_timestamp_and_metadata_roundtrip(env, tmp_path):
+    xml_path = tmp_path / "stamp.xml"
+    xml_io.write_xml(xml_path, {"labels": [], "quality": "",
+        "timestamp": "2026-09-07T12:00:00+08:00", "sample_id": "sample-1"})
+    result = importer.import_zip(env.dataset_id, archive({"a.png": picture(), "a.xml": xml_path.read_bytes()}))
+    assert result["imported"] == 1
+    assert records(env)[0].timestamp == datetime(2026, 9, 7, 4, 0)
+    assert xml_io.read_xml(env.root / "a.xml")["sample_id"] == "sample-1"
+
+
+def test_invalid_zip_and_empty_archive(env):
+    with pytest.raises(zipfile.BadZipFile):
+        importer.import_zip(env.dataset_id, b"not ZIP")
+    with pytest.raises(importer.ImportValidationError, match="不含"):
+        importer.import_zip(env.dataset_id, archive({"readme.txt": b"text"}))

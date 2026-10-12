@@ -25,11 +25,14 @@ XML schema（锁定决策 2）:
 from __future__ import annotations
 
 import io
+import hashlib
 import os
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from app import config
 
 # ---------------------------------------------------------------------------
 # 序列化（canonical、确定性）
@@ -37,6 +40,8 @@ from typing import Any, Dict, List, Optional
 
 _FIELD_ORDER: List[str] = ["folder", "filename", "path"]
 _SIZE_KEYS: List[str] = ["width", "height", "depth"]
+_METADATA_KEYS = ("schema_version", "sample_id", "source_path", "timestamp",
+                  "timestamp_source", "image_sha256", "annotation_source")
 
 
 def _fmt_confidence(value: Any) -> str:
@@ -74,6 +79,9 @@ def _build_tree(data: Dict[str, Any]) -> ET.Element:
             label.get("confidence", 1.0)
         )
 
+    for key in _METADATA_KEYS:
+        if key in data:
+            _set_text(ET.SubElement(root, key), str(data[key] or ""))
     return root
 
 
@@ -125,15 +133,35 @@ def _parse_labels(labels_elem: Optional[ET.Element]) -> List[Dict[str, Any]]:
 
 def read_xml(path: Any) -> Dict[str, Any]:
     """读取标注 XML → dict。容忍缺失 <size>/<labels>/<quality>（各自按缺省处理）。"""
-    tree = ET.parse(str(path))
-    root = tree.getroot()
+    with open(path, "rb") as stream:
+        content = stream.read(config.MAX_XML_BYTES + 1)
+    return _parse_content(content, path)
+
+
+def read_versioned_xml(path: Any) -> Dict[str, Any]:
+    """解析与revision来自同一份字节，避免读取期间换版导致错误乐观锁。"""
+    with open(path, "rb") as stream:
+        content = stream.read(config.MAX_XML_BYTES + 1)
+    result = _parse_content(content, path)
+    result["revision"] = hashlib.sha256(content).hexdigest()
+    result["annotation_state"] = "已标注" if result["labels"] else "未标注"
+    return result
+
+
+def _parse_content(content: bytes, path: Any) -> Dict[str, Any]:
+    if len(content) > config.MAX_XML_BYTES:
+        raise ValueError("XML 超过大小限制")
+    scanned = content.replace(b"\x00", b"").upper()
+    if b"<!DOCTYPE" in scanned or b"<!ENTITY" in scanned:
+        raise ValueError("XML 不允许 DTD 或实体声明")
+    root = ET.fromstring(content)
 
     if root.tag != "annotation":
         raise ValueError(
             f"不是四诊标注 XML（根元素为 <{root.tag}>，应为 <annotation>）: {path}"
         )
 
-    return {
+    result = {
         "folder": root.findtext("folder") or "",
         "filename": root.findtext("filename") or "",
         "path": root.findtext("path") or "",
@@ -141,6 +169,10 @@ def read_xml(path: Any) -> Dict[str, Any]:
         "quality": root.findtext("quality") or "",
         "labels": _parse_labels(root.find("labels")),
     }
+    for key in _METADATA_KEYS:
+        if root.find(key) is not None:
+            result[key] = root.findtext(key) or ""
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -150,10 +182,14 @@ def read_xml(path: Any) -> Dict[str, Any]:
 
 def write_xml(path: Any, data: Dict[str, Any]) -> None:
     """原子写标注 XML：同目录临时文件 + os.replace，崩溃/并发不留半截文件。"""
+    write_bytes_atomic(path, _serialize(data))
+
+
+def write_bytes_atomic(path: Any, payload: bytes) -> None:
+    """原子发布字节；也用于数据库提交失败时恢复原XML的确切内容。"""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    payload = _serialize(data)
     fd, tmp_path = tempfile.mkstemp(
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
     )

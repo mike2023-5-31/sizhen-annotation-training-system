@@ -1,144 +1,234 @@
-"""ZIP 数据集导入服务（T7，需求 6.2a）。
-
-落盘约定（与 T8/T9/T10/T11 共用，锁定决策 11）：
-- 图片与同名 XML 并列存放于 ``data/datasets/<dataset_id>/<filename>``；
-- ``Record.image_path`` = 图片绝对路径；``Record.filename`` = basename；
-- 白名单扩展名仅 ``.jpg .jpeg .png .bmp .gif``（大小写不敏感），其余文件一律忽略；
-- 图片无同名 XML → 跳过（计入 ``skipped``），不落盘、不建记录；
-- 同名 XML 解析失败 → 计入 ``errors``，不落盘、不建记录；
-- 解压临时目录位于 ``config.UPLOAD_DIR`` 下，结束后整体删除（无孤儿文件）。
-
-时间戳：``read_xml`` 结果若含 ``timestamp`` 键则优先采用（当前 XML schema 无该
-元素，属前向兼容）；否则取解压后文件 mtime（zipfile 解压时保留条目原始时间）。
-
-错误分类：``BadZipFile`` 由本函数上抛（router 转 400）；数据集不存在抛
-``ValueError``（router 转 404）；单文件级失败只记入返回值的 ``errors``。
-"""
+"""受限ZIP导入：相对路径配对、真实解码、无XML初始化，绝不覆盖现有资产。"""
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import shutil
+import stat
 import tempfile
 import time
+import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from PIL import Image
+from sqlalchemy import select
+
 from app import config
 from app.db import SessionLocal
+from app.labels_config import CATEGORIES
 from app.models.orm import Dataset, Record
 from app.services import xml_io
 
-# 白名单图片扩展名（小写、含点号）——需求 6.2a 锁定
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
 XML_EXTENSION = ".xml"
 
 
+class ImportValidationError(ValueError):
+    """归档不符合导入契约（HTTP 400），不是数据集不存在。"""
+
+
 def _is_image(name: str) -> bool:
-    """扩展名（大小写不敏感）是否在白名单内。"""
-    return Path(name).suffix.lower() in IMAGE_EXTENSIONS
+    return PurePosixPath(name).suffix.lower() in IMAGE_EXTENSIONS
 
 
-def _zip_mtime(info: zipfile.ZipInfo) -> float:
-    """ZIP 条目记录的原始 mtime（epoch 秒，本地时区解释）。"""
-    return time.mktime((*info.date_time, 0, 0, -1))
+def _safe_name(info: zipfile.ZipInfo) -> str:
+    name = info.filename.replace("\\", "/")
+    path = PurePosixPath(name)
+    mode = info.external_attr >> 16
+    if path.is_absolute() or ".." in path.parts or ":" in name or stat.S_ISLNK(mode):
+        raise ImportValidationError(f"不安全的归档路径: {info.filename}")
+    if not path.name or any(part.rstrip(" .") != part for part in path.parts):
+        raise ImportValidationError(f"非法归档文件名: {info.filename}")
+    reserved = {"CON", "PRN", "AUX", "NUL"} | {f"{prefix}{i}" for prefix in ("COM", "LPT") for i in range(1, 10)}
+    if path.stem.upper() in reserved or any(c in name for c in '<>"|?*'):
+        raise ImportValidationError(f"非法归档文件名: {info.filename}")
+    return path.as_posix()
 
 
-def _resolve_timestamp(value: Any, image_on_disk: Path) -> datetime | None:
-    """XML 提供的采集时间优先；缺失/不可解析时回退文件 mtime。"""
-    if value is not None:
+def _resolve_timestamp(value: Any, image_on_disk: Path) -> datetime:
+    if value:
         try:
-            return datetime.fromisoformat(str(value))
+            parsed = datetime.fromisoformat(str(value))
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed
         except ValueError:
             pass
-    return datetime.fromtimestamp(image_on_disk.stat().st_mtime)
+    return datetime.fromtimestamp(image_on_disk.stat().st_mtime, timezone.utc).replace(tzinfo=None)
+
+
+def _image_size(path: Path) -> dict[str, int]:
+    with Image.open(path) as image:
+        if image.width * image.height > config.MAX_IMAGE_PIXELS:
+            raise ValueError("图片像素数超过限制")
+        image.verify()
+    with Image.open(path) as image:
+        image.seek(0)
+        image.load()
+        return {"width": image.width, "height": image.height, "depth": len(image.getbands())}
+
+
+def _validate_annotation(data: dict) -> None:
+    if data.get("quality", "") not in {"", "合格", "不合格"}:
+        raise ValueError("非法质量标记")
+    allowed = {item["name"]: set(item["labels"]) for item in CATEGORIES}
+    seen = set()
+    for label in data.get("labels", []):
+        category, name = label["category"], label["name"]
+        if category not in allowed or name not in allowed[category]:
+            raise ValueError(f"未知标签: {category}/{name}")
+        if category in seen:
+            raise ValueError(f"当前分类模板每属性只能有一个值: {category}")
+        if not 0 <= label.get("confidence", 1) <= 1:
+            raise ValueError("标签置信度必须在[0,1]范围内")
+        seen.add(category)
+
+
+def _signature(data: dict) -> tuple:
+    return (data.get("quality", ""), tuple(sorted(
+        (label["category"], label["name"], label.get("confidence", 1.0))
+        for label in data.get("labels", [])
+    )))
 
 
 def import_zip(dataset_id: int, zip_bytes: bytes) -> dict[str, Any]:
-    """解压 ZIP，识别白名单图片并与同名 XML 配对后导入数据集。
-
-    返回 ``{"imported": N, "skipped": [filenames], "errors": [messages]}``。
-    """
-    with SessionLocal() as db:
+    if len(zip_bytes) > config.MAX_UPLOAD_BYTES:
+        raise ImportValidationError("ZIP 超过上传大小限制")
+    imported, initialized, duplicates = 0, 0, 0
+    skipped, errors, mappings = [], [], []
+    created: list[Path] = []
+    config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    with SessionLocal() as db, tempfile.TemporaryDirectory(dir=config.UPLOAD_DIR, prefix="import-") as temporary:
+        # SQLite事务在读取已有记录前获取写锁，避免多worker同时选择相同文件名。
+        if db.get_bind().dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
         dataset = db.get(Dataset, dataset_id)
         if dataset is None:
             raise ValueError(f"数据集 {dataset_id} 不存在")
-
         dataset_dir = config.DATASETS_DIR / str(dataset_id)
         dataset_dir.mkdir(parents=True, exist_ok=True)
-
-        imported = 0
-        skipped: list[str] = []
-        errors: list[str] = []
-
-        # 解压到 UPLOAD_DIR 下的临时目录（finally 清理，无孤儿文件）
-        tmp_dir = Path(
-            tempfile.mkdtemp(prefix=f"import-{dataset_id}-", dir=str(config.UPLOAD_DIR))
-        )
+        extracted: dict[str, tuple[str, Path]] = {}
         try:
-            # BadZipFile 由此处上抛 → router 转 400；此时未产生任何落盘
-            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-                extracted: dict[str, Path] = {}  # 小写 basename -> 临时文件路径
-                for info in zf.infolist():
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+                infos = archive.infolist()
+                if len(infos) > config.MAX_ARCHIVE_ENTRIES:
+                    raise ImportValidationError("ZIP 条目数超过限制")
+                if sum(info.file_size for info in infos) > config.MAX_ARCHIVE_BYTES:
+                    raise ImportValidationError("ZIP 解压总量超过限制")
+                for index, info in enumerate(infos):
                     if info.is_dir():
                         continue
-                    # 仅取 basename：杜绝 Zip Slip 目录穿越
-                    name = PurePosixPath(info.filename).name
-                    if not name:
+                    name = _safe_name(info)
+                    if not (_is_image(name) or name.lower().endswith(".xml")):
                         continue
-                    key = name.lower()
+                    if info.file_size / max(info.compress_size, 1) > config.MAX_ARCHIVE_RATIO:
+                        raise ImportValidationError(f"ZIP 压缩比超过限制: {name}")
+                    key = name.casefold()
                     if key in extracted:
-                        errors.append(f"重复文件名（忽略）: {info.filename}")
-                        continue
-                    # 非白名单图片、非 XML → 完全忽略（不提取）
-                    if not (_is_image(name) or key.endswith(XML_EXTENSION)):
-                        continue
-                    target = tmp_dir / name
-                    with zf.open(info) as src, open(target, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-                    mtime = _zip_mtime(info)
+                        raise ImportValidationError(f"ZIP 重复路径（大小写不敏感）: {name}")
+                    target = Path(temporary) / f"{index}{PurePosixPath(name).suffix}"
+                    with archive.open(info) as source, target.open("wb") as output:
+                        shutil.copyfileobj(source, output)
+                    mtime = time.mktime((*info.date_time, 0, 0, -1))
                     os.utime(target, (mtime, mtime))
-                    extracted[key] = target
+                    extracted[key] = (name, target)
 
-            for img_path in sorted(p for k, p in extracted.items() if _is_image(k)):
-                xml_path = extracted.get(PurePosixPath(img_path.name).stem.lower() + XML_EXTENSION)
-                if xml_path is None:
-                    # 图片无同名 XML → 跳过，不建记录（需求 6.2a）
-                    skipped.append(img_path.name)
+            records = list(db.scalars(select(Record).where(Record.dataset_id == dataset_id)).all())
+            by_hash: dict[str, list[Path]] = {}
+            for record in records:
+                existing = Path(record.image_path)
+                if existing.is_file():
+                    digest = hashlib.sha256(existing.read_bytes()).hexdigest()
+                    by_hash.setdefault(digest, []).append(existing.with_suffix(".xml"))
+            claimed_xml: dict[str, list[str]] = {}
+            candidates = []
+            for key, (name, source) in sorted(extracted.items()):
+                if not _is_image(key):
                     continue
-
+                # 同目录及平台历史 images/... + labels/... 导出结构。
+                xml_keys = [key + ".xml", str(PurePosixPath(key).with_suffix(".xml"))]
+                if key.startswith("images/"):
+                    xml_keys += [prefix + item[len("images/"):] for prefix in ("labels/", "annotations/")
+                                 for item in xml_keys.copy()]
+                found = [item for item in xml_keys if item in extracted]
+                if len(found) > 1:
+                    errors.append(f"{name}: 存在多个候选 XML，无法确定配对")
+                    continue
+                xml_key = found[0] if found else None
+                if xml_key:
+                    claimed_xml.setdefault(xml_key, []).append(name)
+                candidates.append((name, source, xml_key))
+            for name, source, xml_key in candidates:
+                if xml_key and len(claimed_xml[xml_key]) > 1:
+                    errors.append(f"{name}: 多张图片共用 XML，配对存在歧义")
+                    continue
                 try:
-                    data = xml_io.read_xml(xml_path)
-                except Exception as exc:  # ParseError / ValueError（根元素不符）
-                    errors.append(f"{img_path.name}: XML 解析失败（{exc}）")
+                    size = _image_size(source)
+                except Exception as exc:
+                    errors.append(f"{name}: 图片解码失败: {exc}")
                     continue
-
-                dst_img = dataset_dir / img_path.name
-                dst_xml = dataset_dir / xml_path.name
+                xml_path = extracted[xml_key][1] if xml_key else None
                 try:
-                    shutil.copy2(img_path, dst_img)
-                    shutil.copy2(xml_path, dst_xml)
-                except OSError as exc:
-                    errors.append(f"{img_path.name}: 落盘失败（{exc}）")
-                    dst_img.unlink(missing_ok=True)
-                    dst_xml.unlink(missing_ok=True)
+                    data = xml_io.read_xml(xml_path) if xml_path else {"labels": [], "quality": ""}
+                    _validate_annotation(data)
+                except Exception as exc:
+                    errors.append(f"{name}: XML 解析失败或标注无效: {exc}")
                     continue
-
-                db.add(
-                    Record(
-                        dataset_id=dataset_id,
-                        filename=img_path.name,
-                        image_path=str(dst_img.resolve()),
-                        timestamp=_resolve_timestamp(data.get("timestamp"), dst_img),
-                        quality=data.get("quality") or "",
-                    )
-                )
+                digest = hashlib.sha256(source.read_bytes()).hexdigest()
+                existing_xml = by_hash.get(digest, [])
+                if existing_xml:
+                    matching = any(path.is_file() and _signature(xml_io.read_xml(path)) == _signature(data)
+                                   for path in existing_xml)
+                    if matching or xml_path is None:
+                        skipped.append(name)
+                        duplicates += 1
+                    else:
+                        errors.append(f"{name}: 图片内容重复但标注冲突，保留现有标注")
+                    continue
+                filename = PurePosixPath(name).name
+                destination = dataset_dir / filename
+                occupied = {path.stem.casefold() for path in dataset_dir.iterdir()}
+                if destination.stem.casefold() in occupied:
+                    stem = destination.stem
+                    suffix = hashlib.sha256(name.encode()).hexdigest()[:10]
+                    destination = dataset_dir / f"{stem}-{suffix}{destination.suffix}"
+                    counter = 1
+                    while destination.stem.casefold() in occupied:
+                        destination = dataset_dir / f"{stem}-{suffix}-{counter}{destination.suffix}"
+                        counter += 1
+                annotation_path = destination.with_suffix(".xml")
+                with destination.open("xb") as output:
+                    created.append(destination)
+                    with source.open("rb") as input_stream:
+                        shutil.copyfileobj(input_stream, output)
+                shutil.copystat(source, destination)
+                with annotation_path.open("xb"):
+                    created.append(annotation_path)
+                if xml_path and destination.name == filename:
+                    shutil.copyfile(xml_path, annotation_path)
+                else:
+                    data.update({"filename": destination.name, "folder": dataset.name,
+                                 "path": f"{dataset_id}/{destination.name}", "size": size,
+                                 "source_path": name, "image_sha256": digest,
+                                 "schema_version": "2", "sample_id": str(uuid.uuid4()),
+                                 "timestamp_source": "archive_mtime" if not data.get("timestamp") else "annotation"})
+                    xml_io.write_xml(annotation_path, data)
+                db.add(Record(dataset_id=dataset_id, filename=destination.name,
+                              image_path=str(destination.resolve()), quality=data.get("quality", ""),
+                              timestamp=_resolve_timestamp(data.get("timestamp"), destination)))
+                by_hash.setdefault(digest, []).append(annotation_path)
+                mappings.append({"source": name, "filename": destination.name, "sha256": digest})
                 imported += 1
-
+                initialized += int(xml_path is None)
+            if not candidates and not errors:
+                raise ImportValidationError("ZIP 不含有效的候选图片")
             db.commit()
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    return {"imported": imported, "skipped": skipped, "errors": errors}
+        except BaseException:
+            db.rollback()
+            for path in reversed(created):
+                path.unlink(missing_ok=True)
+            raise
+    return {"imported": imported, "initialized": initialized, "duplicates": duplicates,
+            "skipped": skipped, "errors": errors, "files": mappings}

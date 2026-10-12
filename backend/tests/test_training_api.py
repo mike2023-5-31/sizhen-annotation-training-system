@@ -52,8 +52,9 @@ def no_download(monkeypatch):
 
 
 @pytest.fixture
-def client(db, no_download):
+def client(db, no_download, login_admin):
     with TestClient(app) as test_client:
+        login_admin(test_client)
         yield test_client
 
 
@@ -122,17 +123,25 @@ def _base_config(ds_ids: list[int], model_dir: Path) -> dict:
 
 def _assert_eval_structure(body: dict) -> None:
     """断言评估 JSON：4 类别混淆矩阵形状正确 + 4 ROC 曲线含 AUC。"""
-    assert set(body["confusion"]) == set(CATEGORY_NAMES)
-    assert set(body["roc"]) == set(CATEGORY_NAMES)
+    expected_counts = {"舌": 2, "面": 2, "声音": 1}
+    assert set(body["confusion"]) == set(expected_counts)
+    assert set(body["roc"]) == set(expected_counts)
+    assert body["details"]["脉"]["valid_count"] == 0
     for i, name in enumerate(CATEGORY_NAMES):
+        if name not in expected_counts:
+            continue
         matrix = body["confusion"][name]
+        assert sum(sum(row) for row in matrix) == expected_counts[name]
         assert len(matrix) == NUM_CLASSES[i], f"{name} 混淆矩阵行数"
         assert all(len(row) == NUM_CLASSES[i] for row in matrix), f"{name} 混淆矩阵列数"
         assert all(isinstance(v, int) for row in matrix for v in row)
         roc = body["roc"][name]
-        assert set(roc) == {"fpr", "tpr", "auc"}, f"{name} ROC 键"
-        assert len(roc["fpr"]) == len(roc["tpr"]) >= 2, f"{name} ROC 点数"
-        assert 0.0 <= roc["auc"] <= 1.0, f"{name} AUC 范围"
+        assert set(roc) >= {"fpr", "tpr", "auc"}, f"{name} ROC 键"
+        if name == "声音":
+            assert roc["auc"] is None and roc["reason"]
+        else:
+            assert len(roc["fpr"]) == len(roc["tpr"]) >= 2
+            assert 0.0 <= roc["auc"] <= 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +235,8 @@ def test_eval_empty_val_no_crash(tmp_path: Path, db, client: TestClient) -> None
     job = train_service.train_manager.wait(job_id, timeout=900)
     assert job["status"] == "completed", job.get("error")
 
+    assert all(metric["val_acc"] is None and metric["val_loss"] is None for metric in job["metrics"])
+    assert not Path(job["checkpoint_best"]).is_file()
     r = client.get(f"/api/training/eval/{job_id}")
     assert r.status_code == 200
     assert r.json() == {"confusion": {}, "roc": {}}

@@ -1,0 +1,44 @@
+{
+  "审核模板": {
+    "path": "D:\\ProgramData\\xmu\\sizhen-annotation-training-system\\docs\\开题材料-20261008\\qa\\审核模板.docx",
+    "sha256": "2e0bb508ffba841de5b73673f88f551e1aa02b7c39136caa7afa9ba7bc3d6994",
+    "parts": {
+      "[Content_Types].xml": "ec5bf70cddf88a4e2a85636f99937ba7fd7d65dd3dc2b7b3d81b130e72746cb0",
+      "_rels/.rels": "c30fe099dbcfed4ecc4ae544ccf82f432c8d3bb665e2a301df283738b196d803",
+      "word/document.xml": "fe4e20f12b69585976c5044d530d2a8fe246b057a6c390f29a17af16e8dc55ce",
+      "word/_rels/document.xml.rels": "b9d628d3747b5dbaab225dfcf5a8d79a7f1009cb1031e05b6bbc47bc19b54d29",
+      "word/footnotes.xml": "3c1e882230ca8a4bb279536cb0d323665b144755b73de8636a84609858ce1d98",
+      "word/endnotes.xml": "024195c9e1b63b68ca23f553da0529f4a31571eb1b0cb59b4ef5140c4917c48b",
+      "word/footer1.xml": "97a0be11a4e0d0e576166ed05d17d65ea2b699b2caf3a8bf70f165b6814d020c",
+      "word/footer2.xml": "949c5bb09e238fc0f00d5c2c6fcbac6c342004607781b51df2129fc7a70dfb52",
+      "word/theme/theme1.xml": "2f9416f0ce25c6b7ba9e03b32993d8ffb12ff90ee0a46152ba11db92a6ca5bbb",
+      "word/settings.xml": "7fe34e237dda37ebd5ac10b79b16bf7a94270e001ef51a92bff12b47cd791eca",
+      "word/styles.xml": "dce9aa4facdfae81d1b29f4a05324fd7cd38bba96ad2913c6b15a9b334940695",
+      "word/webSettings.xml": "a935be2dde349160ee390cc5b6a06aa057cfd44feac230f6eff440889f53902f",
+      "word/fontTable.xml": "660fa4c675762114044d84008f64f48f5e5bb692de7b7f17f0a44e55efc3e6f2",
+      "docProps/core.xml": "bfafbb96f808ee8c7413c35404632a1da503351149215c5e8a2ab73d071ea20d",
+      "docProps/app.xml": "ff462a1fd4d7dd479a3fc49733810c94f6f61c32d2665409c5ef70e350afba7d",
+      "docProps/custom.xml": "4769948fc3ad7987ee1da99189817ad29630320f1b67d4120a92b898f9b8c3b0"
+    }
+  },
+  "选题模板": {
+    "path": "D:\\ProgramData\\xmu\\sizhen-annotation-training-system\\docs\\开题材料-20261008\\qa\\选题模板.docx",
+    "sha256": "ca5e468cd0c902c2ff3e6e5d2fdb9cb5a444d4627e0047c7ecd1da5a4c832654",
+    "parts": {
+      "[Content_Types].xml": "5dc3c6cd519447ad530ae867d097c556e33cd8cb3e1b2439a804a5584673fc7c",
+      "_rels/.rels": "e19238d7a71fa7a2490776252686f70e2de6238c87cd509b5e3a3cc07c2ea4df",
+      "word/document.xml": "65e98ba0b40ce7f44261fdfea47ec488489f2bea0a3ae466eb0988f36835d46e",
+      "word/_rels/document.xml.rels": "4984fd80e83f7eeb9c75574e31c0c298e29ede9c9d3dd94b06f2d9f8ba657054",
+      "word/footnotes.xml": "279eac0f032cdf526772de04f37e25ee9e22c2f4a3601c1412465ddf6873f8c9",
+      "word/endnotes.xml": "d092e3e985ed0af1c91d09f5d1e4a6d4e09c137a1b2e2a203636f7870ecd63e9",
+      "word/theme/theme1.xml": "2f9416f0ce25c6b7ba9e03b32993d8ffb12ff90ee0a46152ba11db92a6ca5bbb",
+      "word/settings.xml": "fd9e4bcdcbb368a32862e8f986a5588de23e21e1c0079032e233830929f94906",
+      "word/numbering.xml": "f66c41f066ca9d1680457b1f9ae1d06c2ef7e4a68d4d37865990b0d7eee79b62",
+      "word/styles.xml": "d5bd9da11d4c7716871d291e2047d88e5ee9a0559b583b1e4e222d71126dcab7",
+      "word/webSettings.xml": "d9e9d412919113656ad184c44745fc0b3f0428edfc28d5351d3f511a8243da64",
+      "word/fontTable.xml": "fcb1c320acc0889f126f3b5c4d336ab4c9fdad1bfd95b8c5470257516cdf6a9f",
+      "docProps/core.xml": "d9eb78054d55047505f156d01efe74fe8205bb4ed604d92c2b37963ed948704b",
+      "docProps/app.xml": "d3795f61ad0bc413126722f33c7820a806ae1d366b6e444743d811f7e342619d"
+    }
+  }
+}

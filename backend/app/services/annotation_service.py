@@ -20,8 +20,16 @@ from typing import Any
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models.orm import Record
+from app.models.orm import Record, AnnotationEdit, User
 from app.services import xml_io
+
+
+class AnnotationConflict(ValueError):
+    """客户端基于过期修订写入，不允许后写覆盖。"""
+
+    def __init__(self, current: dict):
+        super().__init__("标注已被其他操作更新，请核对最新内容后重新保存")
+        self.current = current
 
 
 def _get_record(db, dataset_id: int, filename: str) -> Record:
@@ -61,6 +69,8 @@ def save_labels(
     filename: str,
     labels: list[dict[str, Any]],
     quality: str,
+    expected_revision: str | None = None,
+    actor_id: str | None = None,
 ) -> dict[str, Any]:
     """写回标注：读既有 XML 保留 folder/path/size → 合并 labels+quality →
     原子写 XML → 镜像 ``Record.quality``。返回写盘后的完整 dict。
@@ -69,30 +79,60 @@ def save_labels(
     XML 恒存在，此处仅防御）。
     """
     with SessionLocal() as db:
+        if db.get_bind().dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
         rec = _get_record(db, dataset_id, filename)
         image_path = Path(rec.image_path)
         xml_path = image_path.with_suffix(".xml")
 
         existing: dict[str, Any]
         if xml_path.is_file():
-            existing = xml_io.read_xml(xml_path)
+            existing = xml_io.read_versioned_xml(xml_path)
         else:
             existing = {}
+        if expected_revision is not None and expected_revision != existing.get("revision", "missing"):
+            raise AnnotationConflict(existing)
+        original_bytes = xml_path.read_bytes() if xml_path.is_file() else None
 
         data = {
+            **existing,
             "folder": existing.get("folder") or rec.dataset.name,
             "filename": existing.get("filename") or filename,
             "path": existing.get("path") or f"{dataset_id}/{filename}",
             "size": existing.get("size"),
             "quality": quality,
             "labels": _normalize_labels(labels),
+            "annotation_source": "human",
         }
-        xml_io.write_xml(xml_path, data)
+        try:
+            xml_io.write_xml(xml_path, data)
+            current = xml_io.read_versioned_xml(xml_path)
+            rec.quality = quality
+            db.add(AnnotationEdit(record_id=rec.id, dataset_id=dataset_id, actor_id=actor_id,
+                                 previous_revision=existing.get("revision", "missing"),
+                                 revision=current["revision"], before=existing, after=current))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            if original_bytes is None:
+                xml_path.unlink(missing_ok=True)
+            else:
+                xml_io.write_bytes_atomic(xml_path, original_bytes)
+            raise
+        return current
 
-        # quality 镜像（锁定决策 11：DB 不存标签，仅镜像 quality）
-        rec.quality = quality
-        db.commit()
-        return data
+
+def list_edits(dataset_id: int, filename: str, offset: int = 0, limit: int = 50) -> dict:
+    with SessionLocal() as db:
+        rec = _get_record(db, dataset_id, filename)
+        rows = db.execute(select(AnnotationEdit, User.username).outerjoin(User, AnnotationEdit.actor_id == User.id)
+                          .where(AnnotationEdit.record_id == rec.id, AnnotationEdit.dataset_id == dataset_id)
+                          .order_by(AnnotationEdit.id.desc()).offset(offset).limit(limit + 1)).all()
+        return {"items": [{"id": edit.id, "actor_id": edit.actor_id, "username": username,
+                           "created_at": edit.created_at.isoformat() + "Z", "revision": edit.revision,
+                           "before": {"labels": edit.before.get("labels", []), "quality": edit.before.get("quality", "")},
+                           "after": {"labels": edit.after.get("labels", []), "quality": edit.after.get("quality", "")}}
+                          for edit, username in rows[:limit]], "has_more": len(rows) > limit}
 
 
 def delete_record(dataset_id: int, filename: str) -> None:

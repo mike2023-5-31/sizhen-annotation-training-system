@@ -4,7 +4,8 @@
   T6+ 各业务 router（datasets/images/training）由后续任务 include 进来。
 - CORS：开发期允许任意来源（``*``，同时覆盖 http://localhost:5173），
   生产可用 ``CORS_ORIGINS`` 环境变量收紧。
-- ``/static``：静态图片服务，根目录 = ``<DATA_DIR>/datasets``。
+- ``/static``：受登录保护的静态图片服务，根目录 = ``<DATA_DIR>/datasets``。
+- 登录会话统一覆盖 HTTP 与 WebSocket；账号初始化见 app.accounts。
 - 全局异常处理器：统一返回 JSON ``{"detail": ...}``。
 
 依赖边界：本文件不直接 import ``app.db`` / ``app.models``（T4 职责）；
@@ -21,6 +22,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import config
+from app.auth_middleware import AuthenticationMiddleware
+from app.routers import auth
 from app.routers import annotations, datasets, images, inference, models, onnx, training
 
 logger = logging.getLogger("uvicorn.error")
@@ -32,6 +35,8 @@ app = FastAPI(
     title="四诊数据标注与AI模型训练系统",
     version="0.1.0",
 )
+
+app.add_middleware(AuthenticationMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,6 +50,7 @@ app.add_middleware(
 # /api 路由（后续任务在此 include_router 追加业务路由）
 # --------------------------------------------------------------------------
 api_router = APIRouter(prefix="/api")
+api_router.include_router(auth.router)
 
 
 @api_router.get("/health")
@@ -86,7 +92,7 @@ app.include_router(api_router)
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
-    return JSONResponse(status_code=500, content={"detail": f"Internal server error: {exc}"})
+    return JSONResponse(status_code=500, content={"detail": "服务内部错误，请联系管理员查看日志"})
 
 
 # --------------------------------------------------------------------------

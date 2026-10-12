@@ -123,7 +123,7 @@ def test_train_cpu_smoke_and_resume(tmp_path: Path, db, no_download) -> None:
         "img3.png": [("脉", "数"), ("声音", "低微")],
         "img4.png": [("舌", "舌苔薄白")],
         "img5.png": [("声音", "清晰")],
-        # img6/img7 无 XML → 全部「正常/无」下标 0
+        # img6/img7 无 XML → 不生成正常标签，不纳入训练
     }
     ds_id = _add_dataset(db, tmp_path, "smoke", images, labels_by_file)
     model_dir = tmp_path / "models"
@@ -272,15 +272,15 @@ def test_target_vector_maps_labels_and_defaults(tmp_path: Path) -> None:
     )
     pulse_labels = [c["labels"] for c in CATEGORIES if c["name"] == "脉"][0]
     assert train_service._target_vector(str(img), "x.png") == [
-        0,
-        0,
+        -100,
+        -100,
         pulse_labels.index("浮"),
-        0,
+        -100,
     ]
-    # 无 XML → 全 0（「正常/无」）
+    # 无 XML → 全部缺失
     assert train_service._target_vector(str(tmp_path / "no_xml.png"), "no_xml.png") == [
-        0,
-        0,
-        0,
-        0,
+        -100,
+        -100,
+        -100,
+        -100,
     ]

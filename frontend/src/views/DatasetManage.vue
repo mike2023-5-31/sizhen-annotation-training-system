@@ -95,7 +95,10 @@
           导入成功：<b>{{ importResult.imported }}</b> 条
         </div>
         <div class="summary-row">
-          跳过（图片无同名 XML）：<b>{{ importResult.skipped.length }}</b> 条
+          其中无 XML、新建未标注记录：<b>{{ importResult.initialized }}</b> 条
+        </div>
+        <div class="summary-row">
+          重复跳过：<b>{{ importResult.skipped.length }}</b> 条
         </div>
         <div v-if="importResult.skipped.length" class="summary-list">
           <div v-for="f in importResult.skipped.slice(0, 10)" :key="f" class="summary-item">
@@ -316,6 +319,7 @@ async function onImportFile(event) {
       datasetId: row.id,
       datasetName: row.name,
       imported: data.imported ?? 0,
+      initialized: data.initialized ?? 0,
       skipped: data.skipped ?? [],
       errors: data.errors ?? [],
     }
