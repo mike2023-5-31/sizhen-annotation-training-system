@@ -13,6 +13,7 @@
   <path>relative/path/image.jpg</path>
   <size><width>640</width><height>480</height><depth>3</depth></size>
   <quality>合格</quality>
+  <collector_alias>COL-A012BCDE</collector_alias>
   <labels>
     <label><category>舌</category><name>舌苔黄</name><confidence>1.0</confidence></label>
   </labels>
@@ -32,6 +33,7 @@
 | `size/height` | 整数 | 否 | 高（像素） |
 | `size/depth` | 整数 | 否 | 通道数（通常 3） |
 | `quality` | 文本 | 是 | 质量标记，取值 ∈ {`合格`, `不合格`, `''`}；缺失按 `''` |
+| `collector_alias` | 文本 | 否 | 采集人脱敏代号，由上游脱敏后提供，格式为 `COL-` 加 8 至 16 位十六进制字符 |
 | `labels` | 元素 | 是 | 标签容器，可含 0–4 个 `<label>` |
 | `labels/label` | 元素 | 否 | 单条标签，**每 category 至多一个** |
 | `label/category` | 文本 | 是 | 四诊类别：舌 / 面 / 脉 / 声音 |
@@ -45,3 +47,5 @@
 - **无 bbox/分割语义**：本系统是分类系统，XML 不含 `bndbox`/掩码。
 - **原子写**：`write_xml` 用「同目录临时文件 + `os.replace`」，崩溃/并发不产生半截文件。
 - **确定性序列化**：`write_xml(path, read_xml(path))` 产物逐字节一致（UTF-8，中文原样保留）。
+
+如有经授权的采集人来源，由上游分配脱敏代号，再以单个纯文本 `collector_alias` 元素提供。归档应在上传前完成脱敏，代号字段只接收上游分配的代号。未提供代号时省略元素，图片详情返回 `null`，界面显示「未知」。新导入时，此字段格式非法、重复或含子节点及属性的图片会记为导入错误。历史 XML 中不符合格式的值在图片详情中显示为未知。合法代号在质量编辑、标签修改及 ZIP 往返中保留。实际采集端字段与脱敏映射待接入时确认。

@@ -29,7 +29,6 @@ _LABELS_BY_CATEGORY: dict[str, set[str]] = {
     category["name"]: set(category["labels"]) for category in CATEGORIES
 }
 
-# 「不合格」仅经导入 XML 带入，标注页不直接设置（REQ-6.4-4）
 _ALLOWED_QUALITY = ("合格", "不合格", "")
 
 
@@ -40,7 +39,7 @@ def get_labels() -> dict[str, list[dict]]:
 
 
 class LabelIn(BaseModel):
-    """单条标签请求项；confidence 由服务端恒写 1.0（人工标注），此处仅容错接收。"""
+    """单条标签请求项；服务端确定置信度，此处仅兼容接收。"""
 
     category: str = Field(min_length=1)
     name: str = Field(min_length=1)

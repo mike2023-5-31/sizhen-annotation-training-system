@@ -8,6 +8,10 @@ const api = axios.create({
   timeout: 30000,
 })
 
+// 长任务（ZIP 导入/导出、训练评估、ONNX 转换/对比/下载、预标注）
+// 需要按请求覆盖默认 30s 超时，否则大数据集会先在浏览器端失败。
+export const LONG_REQUEST_MS = 300000
+
 api.interceptors.request.use(config => {
   config.headers['X-Requested-With'] = 'XMLHttpRequest'
   if (auth.csrf) config.headers['X-CSRF-Token'] = auth.csrf

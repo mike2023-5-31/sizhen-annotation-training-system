@@ -24,9 +24,12 @@ class Dataset(Base):
     """数据集：一次导入/创建的图片集合（一个数据目录 + 一份 XML 标注集）。"""
 
     __tablename__ = "datasets"
+    # 数据集 ID 同时是公开资源地址和存储目录名，删除后不能重新分配。
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    modality: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
@@ -43,6 +46,8 @@ class Record(Base):
     """单张图片记录：路径 + quality/timestamp 镜像（标签存于同目录同名 XML）。"""
 
     __tablename__ = "records"
+    # 历史在 Record 删除后继续保存，后续图片必须取得新的 ID。
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     dataset_id: Mapped[int] = mapped_column(
@@ -72,6 +77,24 @@ class AnnotationEdit(Base):
     revision: Mapped[str] = mapped_column(String(64))
     before: Mapped[dict] = mapped_column(JSON)
     after: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class ImportBatch(Base):
+    """数据集内每次已处理的 ZIP 导入或按时段拉取的汇总。"""
+
+    __tablename__ = "import_batches"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    dataset_id: Mapped[int] = mapped_column(ForeignKey("datasets.id", ondelete="CASCADE"), index=True)
+    actor_id: Mapped[str | None] = mapped_column(String(36))
+    source: Mapped[str] = mapped_column(String(8))
+    filename: Mapped[str | None] = mapped_column(String(255))
+    start_time: Mapped[datetime | None] = mapped_column(DateTime)
+    end_time: Mapped[datetime | None] = mapped_column(DateTime)
+    quality: Mapped[str | None] = mapped_column(String(16))
+    imported: Mapped[int] = mapped_column(default=0)
+    skipped: Mapped[int] = mapped_column(default=0)
+    errors: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 

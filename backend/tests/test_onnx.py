@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import collections
+import hashlib
+import json
 from pathlib import Path
 
 import onnx
@@ -16,12 +18,17 @@ import pytest
 import torch
 import torchvision.models as tvm
 from fastapi.testclient import TestClient
+from PIL import Image
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from app import config
+from app.db import Base
 from app.labels_config import CATEGORIES
 from app.main import app
 from app.models.factory import build_model
-from app.services import onnx_service
+from app.models.orm import Dataset, Record
+from app.services import inference_service, onnx_service
 
 CATEGORY_NAMES = [c["name"] for c in CATEGORIES]
 NUM_CLASSES_4 = [len(c["labels"]) for c in CATEGORIES]
@@ -94,6 +101,22 @@ def test_convert_unsupported_model_raises(tmp_path: Path, monkeypatch) -> None:
         onnx_service.convert(plain, str(tmp_path / "x.onnx"))
 
 
+def test_failed_export_keeps_previous_artifact(tmp_path, monkeypatch):
+    model = _build_resnet18(monkeypatch)
+    target = tmp_path / "stable.onnx"
+    target.write_bytes(b"previous artifact")
+
+    def partial_export(_model, _input, path, **_kwargs):
+        Path(path).write_bytes(b"unfinished")
+        raise RuntimeError("export interrupted")
+
+    monkeypatch.setattr(torch.onnx, "export", partial_export)
+    with pytest.raises(ValueError, match="ONNX 转换"):
+        onnx_service.convert(model, str(target))
+    assert target.read_bytes() == b"previous artifact"
+    assert list(tmp_path.iterdir()) == [target]
+
+
 # ---------------------------------------------------------------------------
 # compare
 # ---------------------------------------------------------------------------
@@ -139,24 +162,63 @@ def test_convert_foreign_pth_rejected(dirs, monkeypatch, login_admin) -> None:
     assert "该模型不支持一键转换" in resp.json()["detail"]
 
 
-def test_download_roundtrip_and_traversal_guard(dirs, monkeypatch, login_admin) -> None:
+def test_download_roundtrip_and_traversal_guard(dirs, monkeypatch, login_admin, tmp_path) -> None:
     """转换 → 下载内容与产物逐字节一致；越界文件名 → 400（REQ-6.21-1 / NF-7.4）。"""
     model_dir, export_dir = dirs
     model = _build_resnet18(monkeypatch)
     _save_checkpoint(model_dir / "best.pth", model)
+    engine = create_engine(f"sqlite:///{tmp_path / 'comparison.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    monkeypatch.setattr(inference_service, "SessionLocal", sessions)
+    with sessions.begin() as db:
+        dataset = Dataset(name="comparison")
+        db.add(dataset)
+        db.flush()
+        dataset_id = dataset.id
+        for filename in ["b.png", "a.png"]:
+            path = tmp_path / filename
+            Image.new("RGB", (16, 16), (70, 15, 110)).save(path)
+            db.add(Record(dataset_id=dataset_id, filename=filename, image_path=str(path)))
 
     with TestClient(app) as client:
         login_admin(client)
         conv = client.post("/api/onnx/convert", json={"model_path": "best.pth"})
         assert conv.status_code == 200
         onnx_name = conv.json()["onnx_name"]
-        assert onnx_name == "best.onnx"
+        source_sha256 = hashlib.sha256((model_dir / "best.pth").read_bytes()).hexdigest()
+        assert source_sha256 in onnx_name
+        assert conv.json()["source_sha256"] == source_sha256
+        assert conv.json()["input_shape"] == [1, 3, 224, 224]
+        assert conv.json()["exported_at"].endswith("+00:00")
         artifact = export_dir / onnx_name
         assert artifact.is_file()
+        assert conv.json()["size_bytes"] == artifact.stat().st_size
+
+        compare_request = {"model_path": "best.pth", "onnx_name": onnx_name, "dataset_id": dataset_id}
+        result = client.post("/api/onnx/compare", json=compare_request)
+        assert result.status_code == 200, result.text
+        report = result.json()
+        assert report["overall_pass"] is True
+        assert report["sample_type"] == "dataset"
+        assert report["sample_count"] == 2
+        assert report["sample_filenames"] == ["a.png", "b.png"]
+        assert all(item["top1_agreement"] == 1.0 for item in report["results"])
+        assert report["source_sha256"] == source_sha256
+
+        _save_checkpoint(model_dir / "different.pth", _build_resnet18(monkeypatch))
+        mismatch = client.post("/api/onnx/compare", json={**compare_request, "model_path": "different.pth"})
+        assert mismatch.status_code == 400
+        assert "源存档" in mismatch.json()["detail"]
 
         dl = client.get(f"/api/onnx/{onnx_name}/download")
         assert dl.status_code == 200
         assert dl.content == artifact.read_bytes()
+        properties = {item.key: item.value for item in onnx.load_model_from_string(dl.content).metadata_props}
+        contract = json.loads(properties["sizhen.inference_contract"])
+        assert contract["input"]["resize"] == {"width": 224, "height": 224, "interpolation": "bilinear"}
+        assert contract["input"]["layout"] == "NCHW"
+        assert [item["labels"] for item in contract["outputs"]] == [list(cat["labels"]) for cat in CATEGORIES]
 
         # 到达 handler 的非法名（backslash 穿越、非 .onnx 后缀）→ 400 守卫
         for bad in ("..%5Csecret.onnx", "not_onnx.pth"):
@@ -170,3 +232,4 @@ def test_download_roundtrip_and_traversal_guard(dirs, monkeypatch, login_admin) 
 
         missing = client.get("/api/onnx/missing.onnx/download")
         assert missing.status_code == 404
+    engine.dispose()

@@ -126,6 +126,26 @@ def test_duplicate_content_and_conflicting_annotations_never_overwrite(env):
     assert len(records(env)) == 1
 
 
+def test_corrupt_existing_annotation_does_not_block_other_imports(env):
+    assert importer.import_zip(env.dataset_id, archive({"old.png": picture()}))["imported"] == 1
+    broken_xml = env.root / "old.xml"
+    broken_xml.write_bytes(b"incomplete")
+
+    result = importer.import_zip(env.dataset_id, archive({
+        "old.png": picture(), "old.xml": annotation(),
+        "new.png": picture(color=(1, 2, 3)),
+    }))
+    assert result["imported"] == 1
+    assert len(result["errors"]) == 1 and "标注冲突" in result["errors"][0]
+    assert broken_xml.read_bytes() == b"incomplete"
+
+
+def test_mislabeled_image_format_does_not_produce_wrong_media_type(env):
+    result = importer.import_zip(env.dataset_id, archive({"a.png": picture("TIFF")}))
+    assert result["imported"] == 0 and "格式" in result["errors"][0]
+    assert records(env) == []
+
+
 def test_different_content_same_name_does_not_overwrite(env):
     original = picture()
     importer.import_zip(env.dataset_id, archive({"a.png": original}))

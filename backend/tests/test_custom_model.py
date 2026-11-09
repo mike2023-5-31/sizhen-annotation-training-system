@@ -1,7 +1,7 @@
 """自定义模型端到端测试（需求 6.7）：上传 / 配置校验 / 训练 / checkpoint / 推理重建。
 
 覆盖链路：
-- ``POST /api/models/custom`` 上传 .py → ``{"model_path": "custom/<name>.py"}``；
+- ``POST /api/models/custom`` 上传 .py → ``{"model_path": "custom/<sha256>/<name>.py"}``；
   非 .py / 空文件 → 400；
 - ``normalize_config``：backbone=custom 强制 custom_model_path（缺省/绝对路径/
   ``..`` 穿越/非 .py → ValueError）；
@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import textwrap
 from pathlib import Path
 
@@ -194,8 +195,9 @@ def test_upload_custom_model_endpoint(client: TestClient, model_dir: Path) -> No
         files={"file": ("tiny_model.py", _TINY_4HEAD_SRC.encode("utf-8"), "text/x-python")},
     )
     assert resp.status_code == 200
-    assert resp.json() == {"model_path": "custom/tiny_model.py"}
-    saved = model_dir / "custom" / "tiny_model.py"
+    model_path = resp.json()["model_path"]
+    assert model_path == f"custom/{hashlib.sha256(_TINY_4HEAD_SRC.encode('utf-8')).hexdigest()}/tiny_model.py"
+    saved = model_dir / model_path
     assert saved.is_file()
     assert saved.read_text(encoding="utf-8") == _TINY_4HEAD_SRC
 
@@ -226,8 +228,15 @@ def test_upload_custom_model_basename_only(client: TestClient, model_dir: Path) 
         files={"file": ("../../evil.py", _TINY_4HEAD_SRC.encode("utf-8"), "text/x-python")},
     )
     assert resp.status_code == 200
-    assert resp.json() == {"model_path": "custom/evil.py"}
-    assert (model_dir / "custom" / "evil.py").is_file()
+    saved = model_dir / resp.json()["model_path"]
+    assert saved.name == "evil.py"
+    assert saved.is_relative_to(model_dir / "custom")
+    assert saved.is_file()
+
+
+def test_custom_model_upload_enforces_size_limit(client: TestClient) -> None:
+    response = client.post("/api/models/custom", files={"file": ("large.py", b"a" * (512 * 1024 + 1))})
+    assert response.status_code == 413
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +321,7 @@ def test_wrap_custom_model_bad_output_raises(tmp_path: Path) -> None:
 
 
 def test_custom_model_train_checkpoint_reload_predict(
-    tmp_path: Path, db, model_dir: Path
+    tmp_path: Path, db, model_dir: Path, client: TestClient
 ) -> None:
     """1 epoch CPU 训练自定义模型 → 存档含 custom 元数据 → 推理侧重建并预测。"""
     custom_dir = model_dir / "custom"
@@ -322,9 +331,11 @@ def test_custom_model_train_checkpoint_reload_predict(
 
     ds_id = _add_dataset(db, tmp_path, "custom_ds", [f"img{i}.png" for i in range(4)])
 
-    job_id = train_service.start_training(
-        _custom_config([ds_id], model_dir, "custom/tiny_model.py")
+    response = client.post(
+        "/api/training/start", json=_custom_config([ds_id], model_dir, "custom/tiny_model.py")
     )
+    assert response.status_code == 200, response.text
+    job_id = response.json()["job_id"]
     job = train_service.train_manager.wait(job_id, timeout=900)
     assert job["status"] == "completed", job.get("error")
     assert len(job["metrics"]) == 1
@@ -346,6 +357,14 @@ def test_custom_model_train_checkpoint_reload_predict(
     for entry in predictions:
         assert len(entry["predictions"]) == 4
         assert [p["category"] for p in entry["predictions"]] == CATEGORY_NAMES
+
+    resumed = _custom_config([ds_id], model_dir, "custom/tiny_model.py")
+    resumed["resume_from"] = latest.name
+    response = client.post("/api/training/start", json=resumed)
+    assert response.status_code == 200, response.text
+    resumed_job = train_service.train_manager.wait(response.json()["job_id"], timeout=900)
+    assert resumed_job["status"] == "completed", resumed_job.get("error")
+    assert resumed_job["start_epoch"] == 1
 
 
 def test_load_model_from_dir_custom_missing_path_raises(tmp_path: Path, model_dir: Path) -> None:

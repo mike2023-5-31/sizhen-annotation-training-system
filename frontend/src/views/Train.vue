@@ -1,11 +1,44 @@
 <template>
-  <div class="train-page">
+  <div ref="trainPage" class="train-page">
     <header class="page-head">
       <h1 class="page-title">模型训练</h1>
       <p class="page-sub">
         配置并启动后台训练任务，训练过程实时推送损失与准确率曲线
       </p>
     </header>
+
+    <el-card v-loading="capabilitiesLoading">
+      <template #header>
+        <div class="toolbar">
+          <span class="title">训练设备</span>
+          <span class="toolbar-spacer"></span>
+          <el-button size="small" @click="loadCapabilities">刷新设备</el-button>
+        </div>
+      </template>
+      <el-alert v-if="capabilitiesError" :title="capabilitiesError" type="warning" :closable="false" />
+      <template v-else-if="capabilities">
+        <div class="job-meta" data-testid="training-capabilities">
+          <span>{{ parallelModeLabel[capabilities.parallel_mode] }}</span>
+          <span>CUDA GPU：{{ capabilities.gpu_count }} 张</span>
+        </div>
+        <el-table v-if="capabilities.devices.length" :data="capabilities.devices" size="small">
+          <el-table-column prop="index" label="设备编号" width="90" />
+          <el-table-column prop="name" label="GPU 型号" min-width="156" />
+          <el-table-column label="显存容量" min-width="98">
+            <template #default="{ row }">{{ row.total_bytes == null ? '暂无数据' : `${mib(row.total_bytes)} MiB` }}</template>
+          </el-table-column>
+          <el-table-column label="设备状态" width="105">
+            <template #default="{ row }">{{ row.status === 'detected' ? '已识别' : '无法读取' }}</template>
+          </el-table-column>
+          <el-table-column label="温度" width="94">
+            <template #default="{ row }">{{ row.temperature_c == null ? '暂无数据' : `${row.temperature_c} °C` }}</template>
+          </el-table-column>
+          <el-table-column label="利用率" width="94">
+            <template #default="{ row }">{{ row.utilization_percent == null ? '暂无数据' : `${row.utilization_percent}%` }}</template>
+          </el-table-column>
+        </el-table>
+      </template>
+    </el-card>
 
     <!-- ===================== 训练配置（REQ-6.9 参数可调） ===================== -->
     <el-card class="config-card">
@@ -20,17 +53,16 @@
       </template>
 
       <el-form
-        label-width="120px"
-        label-position="right"
+        label-position="top"
         class="config-form"
         @submit.prevent
       >
-        <el-form-item label="训练数据集" required>
+        <el-form-item label="训练数据集" required class="wide-field">
           <el-select
             v-model="primaryId"
             placeholder="主训练集（必选）"
             :loading="datasetsLoading"
-            style="width: 240px; margin-right: 12px"
+            style="width: 240px"
           >
             <el-option v-for="ds in datasets" :key="ds.id" :label="ds.name" :value="ds.id" />
           </el-select>
@@ -52,7 +84,7 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item label="骨干网络">
+        <el-form-item label="骨干网络" class="wide-field">
           <el-radio-group v-model="backbone">
             <el-radio value="resnet18">ResNet18</el-radio>
             <el-radio value="resnet50">ResNet50</el-radio>
@@ -123,7 +155,7 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item label="数据增强">
+        <el-form-item label="数据增强" class="wide-field">
           <el-checkbox-group v-model="augmentation">
             <el-checkbox value="randomhorizontalflip">随机水平翻转</el-checkbox>
             <el-checkbox value="randomrotation">随机旋转</el-checkbox>
@@ -151,7 +183,7 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item class="action-item">
+        <el-form-item class="wide-field action-item">
           <el-button type="primary" :loading="starting" @click="onStart">
             启动训练
           </el-button>
@@ -189,15 +221,29 @@
         </div>
       </template>
 
-      <div v-if="selectedJob" class="job-meta">
+      <div v-if="selectedJob" class="job-meta" data-testid="job-meta">
         <el-tag :type="statusTagType(selectedJob.status)" size="small">
           {{ statusText(selectedJob.status) }}
         </el-tag>
         <span v-if="selectedJob.current_epoch != null && selectedJob.total_epochs" class="meta-item">
-          epoch {{ selectedJob.current_epoch }} / {{ selectedJob.total_epochs }}
+          第 {{ selectedJob.current_epoch }} / {{ selectedJob.total_epochs }} 轮
         </span>
         <span v-if="selectedJob.device" class="meta-item">设备：{{ selectedJob.device }}</span>
+        <span v-if="selectedJob.gpu_count != null" class="meta-item">可用 GPU：{{ selectedJob.gpu_count }} 张</span>
         <span v-if="selectedJob.use_amp" class="meta-item">AMP/FP16</span>
+        <span v-if="selectedJob.status === 'running' && currentMetric?.eta_seconds != null" class="meta-item">
+          预计剩余 {{ Math.ceil(currentMetric.eta_seconds) }} 秒
+        </span>
+        <span v-if="currentMetric" class="meta-item">当前学习率：{{ currentMetric.lr.toPrecision(4) }}</span>
+        <span v-if="currentMetric" class="meta-item">训练损失：{{ currentMetric.train_loss?.toFixed(4) ?? '—' }}</span>
+        <span v-if="currentMetric" class="meta-item">
+          训练 / 验证准确率：{{ formatAccuracy(currentMetric.train_acc) }} / {{ formatAccuracy(currentMetric.val_acc) }}
+        </span>
+        <span v-for="gpu in currentMetric?.gpu_metrics || []" :key="gpu.index" class="meta-item">
+          GPU {{ gpu.index }} · 利用率 {{ gpu.utilization_percent == null ? '暂无数据' : `${gpu.utilization_percent}%` }}
+          · 显存 {{ gpu.total_bytes == null ? '暂无数据' : `${mib(gpu.used_bytes)} / ${mib(gpu.total_bytes)} MiB` }}
+          <template v-if="gpu.peak_allocated_bytes != null"> · 本进程分配峰值 {{ mib(gpu.peak_allocated_bytes) }} MiB</template>
+        </span>
         <span v-if="selectedJob.resume_from" class="meta-item">
           续训自：{{ selectedJob.resume_from }}
         </span>
@@ -206,11 +252,18 @@
         </el-text>
       </div>
 
+      <el-progress
+        v-if="selectedJob?.total_epochs > 0"
+        class="training-progress"
+        :percentage="Math.min(100, Math.round((selectedJob.current_epoch ?? 0) / selectedJob.total_epochs * 100))"
+        aria-label="训练进度"
+      />
+
       <div v-if="selectedJob" class="charts">
         <div class="chart-card">
           <div class="chart-card-head">
             <span class="chart-title">损失曲线</span>
-            <span class="chart-hint">train / val · per epoch</span>
+            <span class="chart-hint">训练 / 验证</span>
           </div>
           <div ref="lossEl" class="chart-box" data-testid="loss-chart"></div>
         </div>
@@ -222,6 +275,25 @@
           <div ref="accEl" class="chart-box" data-testid="acc-chart"></div>
         </div>
       </div>
+
+      <details v-if="selectedJob?.metrics.length" class="training-log">
+        <summary>训练日志</summary>
+        <el-table :data="selectedJob.metrics" max-height="240" size="small">
+          <el-table-column label="时间" min-width="154">
+            <template #default="{ row }">{{ row.recorded_at ? new Date(`${row.recorded_at}Z`).toLocaleString('zh-CN') : '—' }}</template>
+          </el-table-column>
+          <el-table-column prop="epoch" label="轮次" width="68" />
+          <el-table-column label="训练损失" min-width="94">
+            <template #default="{ row }">{{ row.train_loss?.toFixed(4) ?? '—' }}</template>
+          </el-table-column>
+          <el-table-column label="训练准确率" min-width="108">
+            <template #default="{ row }">{{ formatAccuracy(row.train_acc) }}</template>
+          </el-table-column>
+          <el-table-column label="验证准确率" min-width="108">
+            <template #default="{ row }">{{ formatAccuracy(row.val_acc) }}</template>
+          </el-table-column>
+        </el-table>
+      </details>
 
       <el-empty
         v-if="!selectedJob"
@@ -243,7 +315,7 @@ import {
   TooltipComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import api from '../api'
+import api, { LONG_REQUEST_MS } from '../api'
 
 // 仅按需注册 ECharts 模块，控制打包体积
 echarts.use([
@@ -288,6 +360,14 @@ const modelsLoading = ref(false)
 
 const starting = ref(false)
 const stopping = ref(false)
+const capabilities = ref(null)
+const capabilitiesLoading = ref(false)
+const capabilitiesError = ref('')
+const parallelModeLabel = {
+  cpu: 'CPU 回退 · FP32',
+  single_gpu: '单卡训练',
+  data_parallel: '多卡数据并行',
+}
 
 // ---------------------------------------------------------------------------
 // 监控状态：任务列表 + 指标曲线（WS 优先，轮询兜底，REQ-6.12）
@@ -296,6 +376,7 @@ const jobs = ref([])
 const selectedJobId = ref(null)
 const currentJobId = ref(null)
 const wsState = ref('connecting') // connecting | open | polling
+const trainPage = ref(null)
 const lossEl = ref(null)
 const accEl = ref(null)
 let lossChart = null
@@ -304,6 +385,15 @@ let accChart = null
 const selectedJob = computed(
   () => jobs.value.find((j) => j.job_id === selectedJobId.value) || null,
 )
+const currentMetric = computed(() => selectedJob.value?.metrics.at(-1))
+
+function mib(bytes) {
+  return Math.round(bytes / (1024 ** 2)).toLocaleString('zh-CN')
+}
+
+function formatAccuracy(accuracy) {
+  return accuracy == null ? '—' : `${(accuracy * 100).toFixed(1)}%`
+}
 const stoppable = computed(() => {
   const job = selectedJob.value
   return !!job && (job.status === 'created' || job.status === 'running')
@@ -348,6 +438,19 @@ function errText(err) {
 // ---------------------------------------------------------------------------
 // 数据加载
 // ---------------------------------------------------------------------------
+async function loadCapabilities() {
+  capabilitiesLoading.value = true
+  capabilitiesError.value = ''
+  try {
+    const { data } = await api.get('/training/capabilities')
+    capabilities.value = data
+  } catch (err) {
+    capabilitiesError.value = `读取训练设备失败：${errText(err)}`
+  } finally {
+    capabilitiesLoading.value = false
+  }
+}
+
 async function loadDatasets() {
   datasetsLoading.value = true
   try {
@@ -425,7 +528,7 @@ async function onStart() {
     }
     if (backbone.value === 'custom') payload.custom_model_path = customModelPath.value
     if (resumeFrom.value) payload.resume_from = resumeFrom.value
-    const { data } = await api.post('/training/start', payload)
+    const { data } = await api.post('/training/start', payload, { timeout: LONG_REQUEST_MS })
     currentJobId.value = data.job_id
     selectedJobId.value = data.job_id
     ElMessage.success(`训练任务已启动：${data.job_id}`)
@@ -497,6 +600,9 @@ function handleFrame(frame) {
         job.status = frame.status
         job.error = frame.error
         job.finished_at = frame.finished_at
+        job.device = frame.device
+        job.gpu_count = frame.gpu_count
+        job.use_amp = frame.use_amp
         if (frame.status === 'completed') {
           ElMessage.success(`训练任务 ${frame.job_id} 已完成，可前往「评估可视化」查看结果`)
         }
@@ -543,11 +649,7 @@ function connectWs() {
   }
   ws.onmessage = (event) => {
     try {
-      // 后端 json.dumps 默认允许 NaN（无验证集任务 val_loss=NaN），浏览器严格
-      // JSON.parse 会抛错导致快照/指标帧被静默丢弃；前端先清洗再解析（NaN→null，
-      // 曲线端 connectNulls 已兼容 null 断点）
-      const payload = String(event.data).replace(/(?:NaN|-?Infinity)/g, 'null')
-      handleFrame(JSON.parse(payload))
+        handleFrame(JSON.parse(event.data))
     } catch {
       // 忽略无法解析的帧
     }
@@ -708,6 +810,8 @@ function onResize() {
   accChart?.resize()
 }
 
+let resizeObserver
+
 watch(selectedJob, async (job) => {
   if (!job) return
   await nextTick()
@@ -727,11 +831,13 @@ watch(backbone, (val) => {
 // 生命周期
 // ---------------------------------------------------------------------------
 onMounted(async () => {
+  resizeObserver = new ResizeObserver(onResize)
+  resizeObserver.observe(trainPage.value)
+  loadCapabilities()
   loadDatasets()
   loadCheckpoints()
   await nextTick()
   ensureCharts()
-  window.addEventListener('resize', onResize)
 
   pollStatus() // 页面刷新后按已记录指标重建曲线（REQ-6.12-4）
   connectWs() // 建立实时推送（优先于轮询）
@@ -750,7 +856,7 @@ onBeforeUnmount(() => {
     // 忽略关闭异常
   }
   ws = null
-  window.removeEventListener('resize', onResize)
+  resizeObserver?.disconnect()
   lossChart?.dispose()
   accChart?.dispose()
   delete window.__sizhenCharts
@@ -758,37 +864,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ---- 页头 ---- */
-.page-head {
-  margin-bottom: var(--ts-space-5);
-}
-
-.page-title {
-  margin: 0 0 var(--ts-space-1);
-  font-size: 1.75rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.25;
-  color: var(--ts-text-primary);
-}
-
-.page-sub {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--ts-text-secondary);
-}
-
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: var(--ts-space-3);
-}
-
-.toolbar-spacer {
-  flex: 1;
-}
-
 .title {
   font-size: 16px;
   font-weight: 600;
@@ -799,14 +874,27 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
-/* ---- 配置表单：软卡内适度收窄 + 标签色柔和 ---- */
 .config-form {
-  max-width: 760px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  column-gap: var(--ts-space-6);
 }
 
 .config-form :deep(.el-form-item__label) {
   color: var(--ts-text-secondary);
   font-weight: 500;
+}
+
+.config-form :deep(.el-form-item__content) {
+  gap: var(--ts-space-2);
+}
+
+.config-form :deep(.el-form-item__content > *) {
+  max-width: 100%;
+}
+
+.wide-field {
+  grid-column: 1 / -1;
 }
 
 .custom-row {
@@ -857,9 +945,24 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
+.training-progress {
+  margin-bottom: var(--ts-space-4);
+}
+
+.training-log {
+  margin-top: var(--ts-space-4);
+}
+
+.training-log summary {
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  padding-block: var(--ts-space-2);
+}
+
 .charts {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--ts-space-4);
 }
 
@@ -895,7 +998,7 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1024px) {
   .charts {
     grid-template-columns: 1fr;
   }

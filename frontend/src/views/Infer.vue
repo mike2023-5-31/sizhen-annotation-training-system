@@ -15,6 +15,7 @@
             placeholder="选择模型"
             clearable
             :loading="modelsLoading"
+            :disabled="predicting || generating"
             style="width: 260px"
           >
             <el-option v-for="m in models" :key="m" :label="m" :value="m" />
@@ -24,6 +25,7 @@
             placeholder="选择数据集"
             clearable
             :loading="datasetsLoading"
+            :disabled="predicting || generating"
             style="width: 220px"
           >
             <el-option
@@ -42,7 +44,7 @@
             批量预测
           </el-button>
           <el-button
-            type="success"
+            plain
             :loading="generating"
             :disabled="!canRun"
             @click="onPreannotation"
@@ -50,9 +52,23 @@
             生成预标注 XML
           </el-button>
           <span class="toolbar-spacer"></span>
-          <el-button @click="loadAll">刷新</el-button>
+          <el-button :disabled="predicting || generating" @click="loadAll">刷新</el-button>
         </div>
       </template>
+
+      <div class="toolbar preannotation-options">
+        <span>预标注最低置信度</span>
+        <el-input-number
+          v-model="confidencePercent"
+          :min="0"
+          :max="100"
+          :precision="0"
+          :disabled="generating"
+          aria-label="预标注最低置信度（百分比）"
+        />
+        <span>%</span>
+        <el-text type="info" size="small">低于此值的预测标签不会写入 XML。</el-text>
+      </div>
 
       <el-alert
         v-if="!modelsLoading && models.length === 0"
@@ -63,6 +79,22 @@
         show-icon
         style="margin-bottom: 12px"
       />
+
+      <el-alert
+        v-if="lastGenerated !== null"
+        :title="`预标注已生成 ${lastGenerated} 个 XML`"
+        type="success"
+        :closable="false"
+        show-icon
+        class="generation-summary"
+      />
+
+      <section v-if="predictionJob" class="prediction-status" aria-label="批量推理状态">
+        <p>{{ predictionStatus }} · <span>已处理 {{ predictionJob.processed }} / {{ predictionJob.total }} 张</span></p>
+        <el-progress :percentage="predictionPercent" aria-label="批量推理进度" />
+      </section>
+      <el-alert v-if="predictionError" :title="predictionError" type="error"
+        :closable="false" show-icon class="generation-summary" />
 
       <el-table
         v-if="rows.length > 0"
@@ -98,9 +130,9 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import api from '../api'
+import api, { LONG_REQUEST_MS } from '../api'
 
 // 4 个分类头展示顺序固定（与后端标签体系 舌/面/脉/声音 一致）
 const categories = ['舌', '面', '脉', '声音']
@@ -113,8 +145,25 @@ const modelsLoading = ref(false)
 const datasetsLoading = ref(false)
 const predicting = ref(false)
 const generating = ref(false)
+const confidencePercent = ref(0)
 const rows = ref([])
 const lastGenerated = ref(null)
+const predictionJob = ref(null)
+const predictionError = ref('')
+const predictionStatus = computed(() => ({
+  queued: '等待调度',
+  running: '推理中',
+  completed: '预测完成',
+  failed: '预测失败',
+})[predictionJob.value?.status])
+const predictionPercent = computed(() => {
+  const job = predictionJob.value
+  if (!job) return 0
+  if (job.status === 'completed') return 100
+  return job.total ? Math.min(100, Math.round(100 * job.processed / job.total)) : 0
+})
+let predictionRequest = null
+let pollTimer = null
 
 function errText(err) {
   return err?.response?.data?.detail || err?.message || '请求失败'
@@ -211,20 +260,46 @@ async function onPredict() {
   if (!validateSelection()) return
   predicting.value = true
   rows.value = []
+  predictionJob.value = null
+  predictionError.value = ''
+  const controller = new AbortController()
+  predictionRequest = controller
   try {
-    const { data } = await api.post('/inference/predict', {
+    const { data } = await api.post('/inference/jobs', {
       model_path: modelPath.value,
       dataset_id: datasetId.value,
-    })
+    }, { signal: controller.signal })
+    await pollPrediction(data.job_id, controller.signal)
+  } catch (err) {
+    if (controller.signal.aborted) return
+    predictionError.value = '批量预测失败：' + errText(err)
+    predicting.value = false
+  }
+}
+
+async function pollPrediction(jobId, signal) {
+  try {
+    const { data } = await api.get('/inference/jobs/' + encodeURIComponent(jobId), { signal })
+    predictionJob.value = data
+    if (data.status === 'queued' || data.status === 'running') {
+      pollTimer = setTimeout(() => pollPrediction(jobId, signal), 700)
+      return
+    }
+    if (data.status === 'failed') {
+      predictionError.value = '批量预测失败：' + (data.error || '推理任务执行失败')
+      predicting.value = false
+      return
+    }
     rows.value = buildRows(data.predictions || [])
+    predicting.value = false
     if (rows.value.length === 0) {
       ElMessage.info('该数据集没有图片，无预测结果')
     } else {
       ElMessage.success(`批量预测完成：共 ${rows.value.length} 张图片`)
     }
   } catch (err) {
-    ElMessage.error(`批量预测失败：${errText(err)}`)
-  } finally {
+    if (signal.aborted) return
+    predictionError.value = '读取批量预测进度失败：' + errText(err)
     predicting.value = false
   }
 }
@@ -232,11 +307,13 @@ async function onPredict() {
 async function onPreannotation() {
   if (!validateSelection()) return
   generating.value = true
+  lastGenerated.value = null
   try {
     const { data } = await api.post('/inference/preannotation', {
       model_path: modelPath.value,
       dataset_id: datasetId.value,
-    })
+      confidence_threshold: (confidencePercent.value ?? 0) / 100,
+    }, { timeout: LONG_REQUEST_MS })
     lastGenerated.value = data.generated ?? 0
     ElMessage.success(`预标注 XML 生成完成：共生成 ${lastGenerated.value} 个`)
   } catch (err) {
@@ -246,47 +323,38 @@ async function onPreannotation() {
   }
 }
 
+watch([modelPath, datasetId], () => {
+  rows.value = []
+  lastGenerated.value = null
+  predictionJob.value = null
+  predictionError.value = ''
+})
+
 onMounted(loadAll)
+onBeforeUnmount(() => {
+  clearTimeout(pollTimer)
+  predictionRequest?.abort()
+})
 </script>
 
 <style scoped>
-/* ---- 页头 ---- */
-.page-head {
-  margin-bottom: var(--ts-space-5);
+.preannotation-options,
+.generation-summary,
+.prediction-status {
+  margin-bottom: var(--ts-space-3);
 }
 
-.page-title {
-  margin: 0 0 var(--ts-space-1);
-  font-size: 1.75rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.25;
-  color: var(--ts-text-primary);
-}
-
-.page-sub {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
+.prediction-status p {
+  margin: 0 0 var(--ts-space-2);
   color: var(--ts-text-secondary);
-}
-
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: var(--ts-space-3);
-}
-
-.toolbar-spacer {
-  flex: 1;
 }
 
 /* ---- 预测结果 ---- */
 .cat-tag.el-tag {
   margin: 0 var(--ts-space-2) 0 0;
-  background: var(--ts-jade-50);
-  border-color: var(--ts-jade-200);
-  color: var(--ts-jade-800);
+  background: var(--ts-blue-soft);
+  border-color: var(--ts-border-default);
+  color: var(--ts-blue);
 }
 
 .cat-pct {

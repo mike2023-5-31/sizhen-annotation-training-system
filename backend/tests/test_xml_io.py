@@ -5,6 +5,8 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import pytest
+
 from app.services.xml_io import read_xml, write_xml
 
 
@@ -122,3 +124,23 @@ def test_atomic_write_no_temp_leftover(tmp_path: Path) -> None:
     leftovers = [f.name for f in tmp_path.rglob("*") if f.is_file() and f.name != "a.xml"]
     assert leftovers == []
     assert read_xml(target)["filename"] == "image_001.jpg"
+
+
+def test_collector_alias_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "collector.xml"
+    write_xml(path, {**_full_data(), "collector_alias": "COL-aB1234cd"})
+    assert read_xml(path)["collector_alias"] == "COL-aB1234cd"
+
+
+@pytest.mark.parametrize("node", [
+    "<collector_alias>张三</collector_alias>",
+    "<collector_alias/>",
+    "<collector_alias>COL-A012BCDE</collector_alias><collector_alias>COL-DEADBEEF</collector_alias>",
+    "<collector_alias name='raw'>COL-A012BCDE</collector_alias>",
+])
+def test_invalid_collector_alias_is_rejected_on_import_and_hidden_on_legacy_read(tmp_path: Path, node: str) -> None:
+    path = tmp_path / "invalid-collector.xml"
+    path.write_text(f"<annotation>{node}</annotation>", encoding="utf-8")
+    assert "collector_alias" not in read_xml(path)
+    with pytest.raises(ValueError, match="采集人脱敏代号"):
+        read_xml(path, strict_collector_alias=True)

@@ -27,6 +27,7 @@ from __future__ import annotations
 import io
 import hashlib
 import os
+import re
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -42,6 +43,8 @@ _FIELD_ORDER: List[str] = ["folder", "filename", "path"]
 _SIZE_KEYS: List[str] = ["width", "height", "depth"]
 _METADATA_KEYS = ("schema_version", "sample_id", "source_path", "timestamp",
                   "timestamp_source", "image_sha256", "annotation_source")
+_COLLECTOR_ALIAS = re.compile(r"COL-[0-9A-Fa-f]{8,16}")
+_COLLECTOR_ALIAS_ERROR = "采集人脱敏代号须为 COL- 加 8 至 16 位十六进制字符"
 
 
 def _fmt_confidence(value: Any) -> str:
@@ -82,6 +85,11 @@ def _build_tree(data: Dict[str, Any]) -> ET.Element:
     for key in _METADATA_KEYS:
         if key in data:
             _set_text(ET.SubElement(root, key), str(data[key] or ""))
+    collector_alias = data.get("collector_alias")
+    if collector_alias is not None:
+        if not isinstance(collector_alias, str) or not _COLLECTOR_ALIAS.fullmatch(collector_alias):
+            raise ValueError(_COLLECTOR_ALIAS_ERROR)
+        ET.SubElement(root, "collector_alias").text = collector_alias
     return root
 
 
@@ -131,11 +139,11 @@ def _parse_labels(labels_elem: Optional[ET.Element]) -> List[Dict[str, Any]]:
     return labels
 
 
-def read_xml(path: Any) -> Dict[str, Any]:
+def read_xml(path: Any, *, strict_collector_alias: bool = False) -> Dict[str, Any]:
     """读取标注 XML → dict。容忍缺失 <size>/<labels>/<quality>（各自按缺省处理）。"""
     with open(path, "rb") as stream:
         content = stream.read(config.MAX_XML_BYTES + 1)
-    return _parse_content(content, path)
+    return _parse_content(content, path, strict_collector_alias=strict_collector_alias)
 
 
 def read_versioned_xml(path: Any) -> Dict[str, Any]:
@@ -148,7 +156,7 @@ def read_versioned_xml(path: Any) -> Dict[str, Any]:
     return result
 
 
-def _parse_content(content: bytes, path: Any) -> Dict[str, Any]:
+def _parse_content(content: bytes, path: Any, *, strict_collector_alias: bool = False) -> Dict[str, Any]:
     if len(content) > config.MAX_XML_BYTES:
         raise ValueError("XML 超过大小限制")
     scanned = content.replace(b"\x00", b"").upper()
@@ -172,6 +180,14 @@ def _parse_content(content: bytes, path: Any) -> Dict[str, Any]:
     for key in _METADATA_KEYS:
         if root.find(key) is not None:
             result[key] = root.findtext(key) or ""
+    collector = root.findall("collector_alias")
+    if collector:
+        node = collector[0]
+        alias = node.text or ""
+        if len(collector) == 1 and not node.attrib and len(node) == 0 and _COLLECTOR_ALIAS.fullmatch(alias):
+            result["collector_alias"] = alias
+        elif strict_collector_alias:
+            raise ValueError(_COLLECTOR_ALIAS_ERROR)
     return result
 
 

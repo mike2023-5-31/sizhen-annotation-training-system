@@ -7,8 +7,8 @@
   （锁定决策 7 / C-5）。
 
 规则（需求 6.4 + 锁定决策）：
-- labels 0–4 个，每 category 至多一个；``confidence`` 恒 1.0（人工标注）；
-- ``quality`` 仅接受「合格」/空字符串（「不合格」只经导入 XML 带入，本接口不设置）；
+- labels 0–4 个，每 category 至多一个；人工变更标签时 ``confidence`` 写为 1.0；
+- 只修改质量时保留既有标签来源及置信度；
 - 图片记录不存在 → ``ValueError``（router 转 404）；
 - 非法标签/质量由 router 侧校验（400），本服务信任输入、只做归一化。
 """
@@ -64,6 +64,10 @@ def _normalize_labels(labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
+def _label_choices(labels: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    return {(label["category"], label["name"]) for label in labels}
+
+
 def save_labels(
     dataset_id: int,
     filename: str,
@@ -94,6 +98,10 @@ def save_labels(
             raise AnnotationConflict(existing)
         original_bytes = xml_path.read_bytes() if xml_path.is_file() else None
 
+        previous_labels = existing.get("labels", [])
+        new_labels = _normalize_labels(labels)
+        labels_changed = (len(previous_labels) != len(new_labels)
+                          or _label_choices(previous_labels) != _label_choices(new_labels))
         data = {
             **existing,
             "folder": existing.get("folder") or rec.dataset.name,
@@ -101,9 +109,10 @@ def save_labels(
             "path": existing.get("path") or f"{dataset_id}/{filename}",
             "size": existing.get("size"),
             "quality": quality,
-            "labels": _normalize_labels(labels),
-            "annotation_source": "human",
+            "labels": new_labels if labels_changed else previous_labels,
         }
+        if labels_changed:
+            data["annotation_source"] = "human"
         try:
             xml_io.write_xml(xml_path, data)
             current = xml_io.read_versioned_xml(xml_path)
@@ -126,7 +135,9 @@ def list_edits(dataset_id: int, filename: str, offset: int = 0, limit: int = 50)
     with SessionLocal() as db:
         rec = _get_record(db, dataset_id, filename)
         rows = db.execute(select(AnnotationEdit, User.username).outerjoin(User, AnnotationEdit.actor_id == User.id)
-                          .where(AnnotationEdit.record_id == rec.id, AnnotationEdit.dataset_id == dataset_id)
+                          .where(AnnotationEdit.record_id == rec.id, AnnotationEdit.dataset_id == dataset_id,
+                                 # 旧库可能已有复用 ID，保留原审计但不挂到当前图片。
+                                 AnnotationEdit.created_at >= rec.created_at)
                           .order_by(AnnotationEdit.id.desc()).offset(offset).limit(limit + 1)).all()
         return {"items": [{"id": edit.id, "actor_id": edit.actor_id, "username": username,
                            "created_at": edit.created_at.isoformat() + "Z", "revision": edit.revision,

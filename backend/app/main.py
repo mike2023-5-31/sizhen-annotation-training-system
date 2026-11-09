@@ -18,6 +18,7 @@ import logging
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -25,6 +26,7 @@ from app import config
 from app.auth_middleware import AuthenticationMiddleware
 from app.routers import auth
 from app.routers import annotations, datasets, images, inference, models, onnx, training
+from app.services.auth_service import COOKIE_NAME
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -85,6 +87,50 @@ api_router.include_router(importlib.import_module("app.routers.import").router)
 
 
 app.include_router(api_router)
+
+
+def openapi_with_session() -> dict:
+    """Describe the HTTP requirements enforced by AuthenticationMiddleware."""
+    if app.openapi_schema is not None:
+        return app.openapi_schema
+    schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+    schemes = schema.setdefault("components", {}).setdefault("securitySchemes", {})
+    schemes.update({
+        "sessionCookie": {
+            "type": "apiKey", "in": "cookie", "name": COOKIE_NAME,
+            "description": "通过同源登录接口签发的 HttpOnly 会话 Cookie。",
+        },
+        "csrfHeader": {
+            "type": "apiKey", "in": "header", "name": "X-CSRF-Token",
+            "description": "写操作必需，登录或 /api/auth/me 返回会话对应的令牌。",
+        },
+    })
+    for path, methods in schema["paths"].items():
+        if not path.startswith("/api/"):
+            continue
+        for method, operation in methods.items():
+            if (path, method) == ("/api/health", "get"):
+                operation["security"] = []
+                continue
+            if (path, method) == ("/api/auth/login", "post"):
+                operation["security"] = []
+                operation.setdefault("parameters", []).append({
+                    "in": "header", "name": "X-Requested-With", "required": True,
+                    "schema": {"type": "string", "enum": ["XMLHttpRequest"]},
+                })
+                continue
+            security: dict[str, list] = {"sessionCookie": []}
+            responses = operation.setdefault("responses", {})
+            responses.setdefault("401", {"description": "需要有效登录会话"})
+            if method not in {"get", "head", "options"}:
+                security["csrfHeader"] = []
+                responses.setdefault("403", {"description": "请求来源、CSRF 或操作权限校验失败"})
+            operation["security"] = [security]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = openapi_with_session
 
 # --------------------------------------------------------------------------
 # 全局异常处理：统一 JSON {"detail": ...}

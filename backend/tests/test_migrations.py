@@ -85,3 +85,65 @@ def test_broken_foreign_keys_stop_upgrade(migration_env):
     with pytest.raises(RuntimeError, match="外键检查失败"):
         migrations.migrate()
     assert "annotation_edits" not in inspect(engine).get_table_names()
+
+
+def test_upgrade_does_not_reuse_legacy_dataset_and_record_ids(migration_env):
+    root, database, engine = migration_env
+    with sqlite3.connect(database) as db:
+        db.executescript("""
+            CREATE TABLE datasets (
+                id INTEGER PRIMARY KEY, name VARCHAR(255) NOT NULL UNIQUE,
+                created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL
+            );
+            CREATE TABLE records (
+                id INTEGER PRIMARY KEY, dataset_id INTEGER NOT NULL, filename VARCHAR(255) NOT NULL,
+                image_path VARCHAR(1024) NOT NULL, timestamp DATETIME, quality VARCHAR(32),
+                created_at DATETIME NOT NULL, FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+            );
+            CREATE INDEX ix_records_dataset_id ON records (dataset_id);
+            INSERT INTO datasets VALUES (1, '旧数据集', '2026-09-01 12:00:00', '2026-09-01 12:00:00');
+            INSERT INTO records (id, dataset_id, filename, image_path, created_at)
+                VALUES (1, 1, 'a.png', 'unchanged/a.png', '2026-09-01 12:00:00');
+        """)
+    AnnotationEdit.__table__.create(engine)
+    with Session(engine) as db:
+        db.add(AnnotationEdit(record_id=51, dataset_id=41, previous_revision="missing",
+                              revision="r1", before={}, after={}))
+        db.commit()
+    # 数据集删除保留磁盘文件。即便这个目录没有对应的审计，也不能分配相同 ID。
+    (root / "datasets" / "57").mkdir(parents=True)
+    backup = migrations.migrate()
+    assert backup is not None
+    with sqlite3.connect(backup) as old:
+        assert old.execute("SELECT id, dataset_id FROM records").fetchall() == [(1, 1)]
+        assert old.execute("SELECT record_id, dataset_id FROM annotation_edits").fetchall() == [(51, 41)]
+        assert "modality" not in {row[1] for row in old.execute("PRAGMA table_info(datasets)")}
+    assert [index["name"] for index in inspect(engine).get_indexes("records")] == ["ix_records_dataset_id"]
+
+    with Session(engine) as db:
+        assert db.get(Record, 1).image_path == "unchanged/a.png"
+        assert db.get(Dataset, 1).modality is None
+        first = Dataset(name="新数据集")
+        db.add(first)
+        db.flush()
+        record = Record(dataset_id=first.id, filename="b.png", image_path="new/b.png")
+        db.add(record)
+        db.flush()
+        assert first.id > 57
+        assert record.id > 51
+        deleted_ids = first.id, record.id
+        db.delete(first)
+        db.commit()
+    migrations.migrate()
+    with Session(engine) as db:
+        second = Dataset(name="重新创建")
+        db.add(second)
+        db.flush()
+        record = Record(dataset_id=second.id, filename="b.png", image_path="new/b.png")
+        db.add(record)
+        db.flush()
+        assert second.id > deleted_ids[0]
+        assert record.id > deleted_ids[1]
+        assert len(list(db.scalars(select(AnnotationEdit)))) == 1
+    with sqlite3.connect(database) as upgraded:
+        assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []

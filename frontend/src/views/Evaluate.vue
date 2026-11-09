@@ -1,5 +1,5 @@
 <template>
-  <div class="eval-page">
+  <div ref="evalPage" class="eval-page">
     <header class="page-head">
       <h1 class="page-title">评估可视化</h1>
       <p class="page-sub">
@@ -47,8 +47,26 @@
 
       <div v-if="loading" v-loading="loading" class="loading-box"></div>
 
+      <template v-if="summaryRows.length">
+        <h2 class="section-title">验证集指标</h2>
+        <el-table :data="summaryRows">
+          <el-table-column prop="category" label="分类头" min-width="110" />
+          <el-table-column prop="valid_count" label="有效样本" min-width="110" />
+          <el-table-column label="类别覆盖" min-width="110">
+            <template #default="{ row }">
+              {{ row.total_class_count ? `${row.covered_class_count} / ${row.total_class_count}` : '—' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="宏平均 F1（已覆盖类别）" min-width="190">
+            <template #default="{ row }">
+              {{ Number.isFinite(row.macro_f1_observed) ? row.macro_f1_observed.toFixed(3) : '—' }}
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+
       <template v-if="hasResult">
-        <h3 class="section-title">混淆矩阵（行=真实标签，列=预测标签）</h3>
+        <h2 class="section-title">混淆矩阵（行=真实标签，列=预测标签）</h2>
         <div class="matrix-grid">
           <div
             v-for="cat in categories"
@@ -65,7 +83,7 @@
           </div>
         </div>
 
-        <h3 class="section-title">ROC 曲线（one-vs-rest）</h3>
+        <h2 class="section-title">ROC 曲线（one-vs-rest）</h2>
         <div class="matrix-grid">
           <div
             v-for="cat in categories"
@@ -99,7 +117,7 @@ import {
   VisualMapComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import api from '../api'
+import api, { LONG_REQUEST_MS } from '../api'
 
 // 仅按需注册 ECharts 模块（Heatmap + Line），控制打包体积
 echarts.use([
@@ -153,6 +171,7 @@ function errText(err) {
 // 状态
 // ---------------------------------------------------------------------------
 const jobs = ref([])
+const evalPage = ref(null)
 const jobsLoading = ref(false)
 const jobId = ref(null)
 const loading = ref(false)
@@ -162,6 +181,9 @@ const labelCategories = ref([]) // GET /labels → [{name, labels}]
 const evalResult = ref(null) // GET /training/eval/{job_id} → {confusion, roc}
 
 const categories = computed(() => labelCategories.value)
+const summaryRows = computed(() =>
+  Object.entries(evalResult.value?.details ?? {}).map(([category, detail]) => ({ category, ...detail })),
+)
 const confusion = computed(() => evalResult.value?.confusion || {})
 const rocData = computed(() => evalResult.value?.roc || {})
 const hasResult = computed(
@@ -226,7 +248,7 @@ async function loadEval() {
   evalResult.value = null
   jobMissing.value = false
   try {
-    const { data } = await api.get(`/training/eval/${jobId.value}`)
+    const { data } = await api.get(`/training/eval/${jobId.value}`, { timeout: LONG_REQUEST_MS })
     evalResult.value = data || { confusion: {}, roc: {} }
     await nextTick()
     renderAll()
@@ -418,13 +440,16 @@ function onResize() {
   Object.values(rocCharts).forEach((c) => c?.resize())
 }
 
+let resizeObserver
+
 // ---------------------------------------------------------------------------
 // 生命周期
 // ---------------------------------------------------------------------------
 onMounted(async () => {
+  resizeObserver = new ResizeObserver(onResize)
+  resizeObserver.observe(evalPage.value)
   await loadLabels()
   await loadJobs()
-  window.addEventListener('resize', onResize)
 
   // 从训练页跳转携带 ?job_id= 时自动查询（导航入口）
   if (route.query.job_id) {
@@ -434,7 +459,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', onResize)
+  resizeObserver?.disconnect()
   Object.values(heatCharts).forEach((c) => c?.dispose())
   Object.values(rocCharts).forEach((c) => c?.dispose())
   delete window.__sizhenEval
@@ -442,42 +467,10 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ---- 页头 ---- */
-.page-head {
-  margin-bottom: var(--ts-space-5);
-}
-
-.page-title {
-  margin: 0 0 var(--ts-space-1);
-  font-size: 1.75rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.25;
-  color: var(--ts-text-primary);
-}
-
-.page-sub {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--ts-text-secondary);
-}
-
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: var(--ts-space-3);
-}
-
-.toolbar-spacer {
-  flex: 1;
-}
-
 .loading-box {
   min-height: 200px;
 }
 
-/* ---- 分区标题：青玉竖条强调（DESIGN.md 2.2） ---- */
 .section-title {
   display: flex;
   align-items: center;
@@ -493,12 +486,12 @@ onBeforeUnmount(() => {
   width: 4px;
   height: 16px;
   border-radius: var(--ts-radius-pill);
-  background: var(--ts-jade-500);
+  background: var(--ts-blue);
 }
 
 .matrix-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--ts-space-4);
 }
 

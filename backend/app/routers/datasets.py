@@ -16,13 +16,20 @@ import io
 from datetime import datetime
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 
 from app.models.orm import Dataset
-from app.schemas.dataset import DatasetCreate, DatasetOut, DatasetRename
+from app.schemas.dataset import (
+    DatasetCreate,
+    DatasetListItem,
+    DatasetOut,
+    DatasetRename,
+    ImportBatchListOut,
+    ImportHistoryOut,
+)
 from app.services import dataset_service, export_service
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
@@ -32,22 +39,33 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 def create_dataset(payload: DatasetCreate) -> Dataset:
     """新建数据集。"""
     try:
-        return dataset_service.create_dataset(payload.name)
+        return dataset_service.create_dataset(payload.name, payload.modality)
     except IntegrityError:
         raise HTTPException(status_code=409, detail=f"数据集名称「{payload.name}」已存在")
 
 
-@router.get("", response_model=list[DatasetOut])
-def list_datasets() -> list[Dataset]:
-    """全部数据集（id 升序）。"""
-    return dataset_service.list_datasets()
+@router.get("", response_model=list[DatasetListItem], response_model_exclude_unset=True)
+def list_datasets(include_stats: bool = False) -> list[DatasetListItem]:
+    """全部数据集（id 升序），按需返回图片数及已标注数。"""
+    datasets = dataset_service.list_datasets()
+    if not include_stats:
+        return [DatasetListItem(**DatasetOut.model_validate(dataset).model_dump(exclude_none=True))
+                for dataset in datasets]
+    counts = dataset_service.get_dataset_counts()
+    return [DatasetListItem(
+        **DatasetOut.model_validate(dataset).model_dump(),
+        **counts.get(dataset.id, {"image_count": 0, "annotated_count": 0}),
+    ) for dataset in datasets]
 
 
 @router.patch("/{dataset_id}", response_model=DatasetOut)
 def rename_dataset(dataset_id: int, payload: DatasetRename) -> Dataset:
     """重命名数据集。"""
     try:
-        return dataset_service.rename_dataset(dataset_id, payload.name)
+        return dataset_service.rename_dataset(
+            dataset_id, payload.name, modality=payload.modality,
+            update_modality="modality" in payload.model_fields_set,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except IntegrityError:
@@ -70,7 +88,7 @@ class PullRecordsIn(BaseModel):
     target_dataset_id: int
     start_time: datetime
     end_time: datetime
-    quality: str = "全部"  # "合格" | "全部"；非法值 → 400
+    quality: str = "合格"  # "合格" | "全部"；非法值 → 400
 
 
 class PullRecordsOut(BaseModel):
@@ -80,7 +98,7 @@ class PullRecordsOut(BaseModel):
 
 
 @router.post("/pull", response_model=PullRecordsOut)
-def pull_records(payload: PullRecordsIn) -> dict[str, int]:
+def pull_records(payload: PullRecordsIn, request: Request) -> dict[str, int]:
     """内置库按时间范围拉取 + 质量过滤（需求 6.2b）。
 
     源为目标数据集之外的全部 Record 行（内置库，与普通数据集共用 records 表），
@@ -95,7 +113,32 @@ def pull_records(payload: PullRecordsIn) -> dict[str, int]:
             start_time=payload.start_time,
             end_time=payload.end_time,
             quality=payload.quality,
+            actor_id=request.state.user["id"],
         )
+    except dataset_service.InvalidPullRange as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/imports", response_model=ImportBatchListOut)
+def import_history_all(
+    dataset_id: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+) -> dict:
+    """跨数据集的导入记录（导入记录中心），按最近处理顺序分页。"""
+    try:
+        return dataset_service.list_all_import_batches(offset, limit, dataset_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{dataset_id}/imports", response_model=ImportHistoryOut)
+def import_history(dataset_id: int, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)) -> dict:
+    """按最近处理顺序返回数据集的 ZIP 导入与时间范围拉取记录。"""
+    try:
+        return dataset_service.list_import_batches(dataset_id, offset, limit)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 

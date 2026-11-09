@@ -3,7 +3,7 @@ import vue from '@vitejs/plugin-vue'
 
 const apiTarget = process.env.VITE_API_TARGET || 'http://localhost:8000'
 
-// Dev server proxies API + WebSocket traffic to the FastAPI backend.
+// Keep API, training WebSocket and protected assets on the browser's origin.
 export default defineConfig({
   plugins: [vue()],
   server: {
@@ -11,11 +11,11 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: apiTarget,
+        ws: true,
         changeOrigin: true,
       },
-      '/ws': {
+      '/static/': {
         target: apiTarget,
-        ws: true,
         changeOrigin: true,
       },
     },

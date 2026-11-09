@@ -21,9 +21,9 @@ with sync_playwright() as p:
     page.wait_for_load_state("networkidle")
     print(page.locator("body").inner_text())
     page.screenshot(path=str(output / "login.png"))
-    expect(page.get_by_role("heading", name="登录平台")).to_be_visible()
+    expect(page.get_by_role("heading", name="登录四诊工作台")).to_be_visible()
     page.get_by_role("textbox", name="账号", exact=True).fill(os.environ["BROWSER_TEST_USERNAME"])
-    page.get_by_role("textbox", name="密码", exact=True).fill(os.environ["BROWSER_TEST_PASSWORD"])
+    page.get_by_label("密码", exact=True).fill(os.environ["BROWSER_TEST_PASSWORD"])
     page.get_by_role("button", name="登录", exact=True).click()
     expect(page).to_have_url(base + "/datasets")
     page.get_by_role("link", name="账号", exact=True).click()
@@ -33,24 +33,25 @@ with sync_playwright() as p:
     names = [f"member-{uuid.uuid4().hex[:8]}" for _ in range(3)]
     for name in names:
         page.get_by_role("textbox", name="新账号", exact=True).fill(name)
-        page.get_by_role("textbox", name="初始密码", exact=True).fill("member-test-password")
+        page.get_by_label("初始密码", exact=True).fill("member-test-password")
         page.get_by_role("button", name="创建账号", exact=True).click()
         expect(page.get_by_role("cell", name=name, exact=True)).to_be_visible()
     expect(page.get_by_role("button", name="创建账号", exact=True)).to_be_enabled()
     page.locator(".el-loading-mask").wait_for(state="hidden")
     page.screenshot(path=str(output / "accounts.png"), full_page=True)
     page.get_by_role("button", name="退出登录", exact=True).click()
-    expect(page.get_by_role("heading", name="登录平台")).to_be_visible()
+    expect(page.get_by_role("heading", name="登录四诊工作台")).to_be_visible()
     page.get_by_role("textbox", name="账号", exact=True).fill(names[0])
-    page.get_by_role("textbox", name="密码", exact=True).fill("member-test-password")
+    page.get_by_label("密码", exact=True).fill("member-test-password")
     page.get_by_role("button", name="登录", exact=True).click()
     expect(page).to_have_url(base + "/datasets")
     page.get_by_role("link", name="账号", exact=True).click()
-    expect(page.get_by_text(names[0] + " · 成员", exact=True)).to_be_visible()
+    expect(page.get_by_role("main").get_by_text(names[0], exact=True)).to_be_visible()
+    expect(page.get_by_role("main").get_by_text("成员", exact=True)).to_be_visible()
     expect(page.get_by_role("heading", name="成员管理")).to_have_count(0)
     assert context.request.get(base + "/api/auth/users").status == 403
     page.get_by_role("button", name="退出登录", exact=True).click()
-    expect(page.get_by_role("heading", name="登录平台")).to_be_visible()
+    expect(page.get_by_role("heading", name="登录四诊工作台")).to_be_visible()
     assert context.request.get(base + "/api/datasets").status == 401
     assert not errors, errors
     (output / "accounts-result.json").write_text(json.dumps({"status": "passed", "members_created": 3,

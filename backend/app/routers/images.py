@@ -7,7 +7,7 @@
 - ``GET /api/datasets/{dataset_id}/images/{filename}`` → 图片二进制（``FileResponse``）；
 - ``GET /api/datasets/{dataset_id}/image/{filename}/labels`` → 同名 XML 标注 dict。
 
-错误映射：``ValueError``（数据集/图片/XML 不存在）→ 404。
+错误映射：``ValueError``（数据集或图片不存在）→ 404。
 
 路由顺序注意：``/images/search`` 必须先于 ``/images/{filename}`` 声明，
 否则 "search" 会被当作 filename 吞掉。
@@ -54,7 +54,7 @@ def get_image(dataset_id: int, filename: str) -> FileResponse:
 
 @router.get("/{dataset_id}/image/{filename}/labels")
 def get_labels(dataset_id: int, filename: str) -> dict:
-    """读取图片同名 XML 标注。图片/XML 不存在 → 404。"""
+    """读取图片的记录时间、大小与同名 XML 标注；无 XML 时返回空标注。"""
     try:
         return image_service.read_labels(dataset_id, filename)
     except ValueError as exc:
