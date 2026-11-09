@@ -89,3 +89,52 @@ def test_database_failure_restores_original_xml(env, monkeypatch):
     with factory() as db:
         assert len(list(db.scalars(select(AnnotationEdit)))) == 0
         assert db.scalar(select(Record)).quality == ""
+
+
+def test_quality_only_edit_preserves_model_suggestions(env):
+    _, dataset_id, path, client = env
+    suggestions = [
+        {"category": "面", "name": "面色红润", "confidence": 0.6},
+        {"category": "舌", "name": "舌苔黄", "confidence": 0.75},
+    ]
+    xml_io.write_xml(path, {"labels": suggestions, "annotation_source": "model"})
+    url = f"/datasets/{dataset_id}/image/a.png/labels"
+    revision = client.get(url).json()["revision"]
+    labels = [{"category": item["category"], "name": item["name"]} for item in reversed(suggestions)]
+
+    quality_only = client.put(url, json={"labels": labels, "quality": "合格", "expected_revision": revision})
+    assert quality_only.status_code == 200, quality_only.text
+    assert quality_only.json()["annotation_source"] == "model"
+    assert quality_only.json()["labels"] == suggestions
+    assert quality_only.json()["quality"] == "合格"
+
+    labels[0]["name"] = "舌质红"
+    human_edit = client.put(url, json={
+        "labels": labels, "quality": "合格", "expected_revision": quality_only.json()["revision"],
+    })
+    assert human_edit.status_code == 200, human_edit.text
+    assert human_edit.json()["annotation_source"] == "human"
+    assert human_edit.json()["labels"][0] == {"category": "舌", "name": "舌质红", "confidence": 1.0}
+
+
+def test_deleted_record_history_stays_with_original_record(env):
+    factory, dataset_id, path, client = env
+    image_url = f"/datasets/{dataset_id}/image/a.png"
+    revision = client.get(image_url + "/labels").json()["revision"]
+    saved = client.put(image_url + "/labels", json={
+        "labels": [{"category": "舌", "name": "舌苔黄"}],
+        "expected_revision": revision,
+    })
+    assert saved.status_code == 200
+    assert len(client.get(image_url + "/history").json()["items"]) == 1
+    assert client.delete(image_url).status_code == 200
+    assert client.get(image_url + "/history").status_code == 404
+
+    image_path = path.with_suffix(".png")
+    Image.new("RGB", (12, 12), "red").save(image_path)
+    with factory() as db:
+        db.add(Record(dataset_id=dataset_id, filename="a.png", image_path=str(image_path)))
+        db.commit()
+    assert client.get(image_url + "/history").json() == {"items": [], "has_more": False}
+    with factory() as db:
+        assert len(list(db.scalars(select(AnnotationEdit)))) == 1

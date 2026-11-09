@@ -166,11 +166,13 @@ def test_train_cpu_smoke_and_resume(tmp_path: Path, db, no_download) -> None:
     assert job2["start_epoch"] == 2
     assert len(job2["metrics"]) == 2
     assert [m["epoch"] for m in job2["metrics"]] == [3, 4]
+    assert job2["metrics"][0]["lr"] == pytest.approx(job["metrics"][-1]["lr"] * 0.1)
     ckpt2 = torch.load(
         Path(job2["checkpoint_latest"]), map_location="cpu", weights_only=False
     )
     assert ckpt2["epoch"] == 4
     assert Path(job2["checkpoint_best"]).is_file()
+    assert train_service.train_manager.compute_eval(job_id2)["confusion"]
 
 
 # ---------------------------------------------------------------------------

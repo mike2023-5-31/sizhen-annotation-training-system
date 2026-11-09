@@ -38,8 +38,10 @@ import math
 import os
 import random
 import re
+import shutil
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,16 +52,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from sqlalchemy import select
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset as TorchDataset
 from torchvision import transforms
 
 from app import config
-from app.config import MODEL_DIR
 from app.db import SessionLocal
 from app.labels_config import CATEGORIES, num_classes_per_head
 from app.models import factory
 from app.models.orm import Dataset, Record
-from app.services import xml_io
+from app.services import checkpoint_io, xml_io
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -169,8 +170,8 @@ def normalize_config(raw: Optional[dict[str, Any]]) -> dict[str, Any]:
         lr = float(raw.get("lr", _DEFAULT_LR))
     except (TypeError, ValueError):
         lr = 0.0
-    if not math.isfinite(lr) or not lr > 0:
-        raise ValueError(f"lr 必须为正数，得到 {raw.get('lr')!r}")
+    if not math.isfinite(lr) or not lr > 0 or lr > 1.0:
+        raise ValueError(f"lr 必须在 (0, 1] 范围内，得到 {raw.get('lr')!r}")
     cfg["lr"] = lr
 
     try:
@@ -180,8 +181,12 @@ def normalize_config(raw: Optional[dict[str, Any]]) -> dict[str, Any]:
         batch_size = epochs = 0
     if batch_size < 1:
         raise ValueError(f"batch_size 必须 ≥ 1，得到 {raw.get('batch_size')!r}")
+    if batch_size > 512:
+        raise ValueError(f"batch_size 必须 ≤ 512，得到 {raw.get('batch_size')!r}")
     if epochs < 1:
         raise ValueError(f"epochs 必须 ≥ 1，得到 {raw.get('epochs')!r}")
+    if epochs > 500:
+        raise ValueError(f"epochs 必须 ≤ 500，得到 {raw.get('epochs')!r}")
     cfg["batch_size"] = batch_size
     cfg["epochs"] = epochs
 
@@ -234,7 +239,7 @@ def normalize_config(raw: Optional[dict[str, Any]]) -> dict[str, Any]:
     cfg["resume_from"] = str(resume_from) if resume_from else None
 
     model_dir = raw.get("model_dir")
-    cfg["model_dir"] = str(Path(model_dir)) if model_dir else str(MODEL_DIR)
+    cfg["model_dir"] = str(Path(model_dir)) if model_dir else str(config.MODEL_DIR)
 
     return cfg
 
@@ -349,12 +354,56 @@ def resolve_device() -> tuple[torch.device, int]:
     return torch.device("cuda:0"), n_gpus
 
 
+def _optional_cuda_read(name: str, index: int) -> int | None:
+    try:
+        return int(getattr(torch.cuda, name)(index))
+    except Exception:  # Optional PyTorch/NVML readings may be absent or unsupported.
+        return None
+
+
+def training_capabilities() -> dict[str, Any]:
+    """Read device properties for the trainer's current CUDA visibility."""
+    device, n_gpus = resolve_device()
+    devices = []
+    for index in range(n_gpus):
+        try:
+            properties = torch.cuda.get_device_properties(index)
+        except (RuntimeError, AssertionError):
+            properties = None
+        devices.append({
+            "index": index,
+            "name": properties.name if properties is not None else None,
+            "total_bytes": properties.total_memory if properties is not None else None,
+            "status": "detected" if properties is not None else "unavailable",
+            "temperature_c": _optional_cuda_read("temperature", index),
+            "utilization_percent": _optional_cuda_read("utilization", index),
+        })
+    parallel_mode = "data_parallel" if n_gpus > 1 else "single_gpu" if n_gpus else "cpu"
+    return {"device": str(device), "gpu_count": n_gpus, "parallel_mode": parallel_mode, "devices": devices}
+
+
+def _gpu_metrics(n_gpus: int, peak_tracking: set[int]) -> list[dict[str, int | None]]:
+    """Sample the CUDA devices visible to this training worker."""
+    metrics = []
+    for index in range(n_gpus):
+        try:
+            free, total = torch.cuda.mem_get_info(index)
+            used = total - free
+        except RuntimeError:
+            used = total = None
+        metrics.append({"index": index, "used_bytes": used, "total_bytes": total,
+                        "utilization_percent": _optional_cuda_read("utilization", index),
+                        "peak_allocated_bytes": _optional_cuda_read("max_memory_allocated", index)
+                        if index in peak_tracking else None})
+    return metrics
+
+
 # ---------------------------------------------------------------------------
 # 数据集与标签体系校验（锁定决策 6）
 # ---------------------------------------------------------------------------
 
 
-class _AnnotationDataset(Dataset):
+class _AnnotationDataset(TorchDataset):
     """图片 + 4 头标签向量数据集。
 
     ``items``：``(image_path, target_vector)``，vector 长度 4（与 CATEGORIES 顺序
@@ -431,6 +480,15 @@ def _prepare_data(dataset_ids: list[int]) -> list[tuple[str, list[int]]]:
         image_path = str(rec.image_path)
         if not Path(image_path).is_file():
             raise ValueError(f"图片文件缺失：{rec.filename}")
+        try:
+            with Image.open(image_path) as image:
+                pixels = image.width * image.height
+        except OSError as exc:
+            raise ValueError(f"图片无法读取：{rec.filename}（{exc}）") from exc
+        if pixels > config.MAX_IMAGE_PIXELS:
+            raise ValueError(
+                f"图片像素超过上限（{rec.filename}）：{pixels} > {config.MAX_IMAGE_PIXELS}"
+            )
         target = _target_vector(image_path, rec.filename)
         # 未观察的属性不是正常；完全无监督的图片不进入分类训练。
         if all(value == _MISSING_TARGET for value in target):
@@ -574,6 +632,7 @@ def _save_checkpoint(
         "custom_model_path": cfg.get("custom_model_path"),
         "num_classes": list(num_classes),
         "category_names": list(category_names),
+        "class_labels": checkpoint_io.current_class_labels(),
         "dropout": cfg["dropout"],
     }
     # 发布存档前完整写入并刷盘；失败不能毁掉上一份可恢复存档。
@@ -599,36 +658,25 @@ def _load_resume_payload(
     ckpt_path = Path(path)
     if not ckpt_path.is_file():
         raise ValueError(f"存档文件不存在：{ckpt_path}")
-    try:
-        checkpoint = torch.load(str(ckpt_path), map_location="cpu", weights_only=True)
-    except Exception:
-        # 兼容含 config dict（Path 等非常规对象）的系统产物（管理员可控的模型目录）
-        checkpoint = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
-
-    if not isinstance(checkpoint, dict):
-        raise ValueError("存档格式损坏：不是系统训练存档（dict）")
+    checkpoint, _ = checkpoint_io.read_checkpoint(ckpt_path)
 
     architecture = checkpoint.get("architecture")
     num_classes = checkpoint.get("num_classes")
     model_state = checkpoint.get("model_state")
     if (
-        (architecture not in _SUPPORTED_BACKBONES and architecture != "custom")
+        not isinstance(architecture, str)
+        or (architecture not in _SUPPORTED_BACKBONES and architecture != "custom")
         or not isinstance(num_classes, list)
-        or model_state is None
+        or not isinstance(model_state, dict)
     ):
         raise ValueError(
             "存档格式损坏或非系统训练产物（缺少 architecture/num_classes/model_state）"
         )
-    if list(num_classes) != num_classes_per_head():
-        raise ValueError(
-            f"存档类别数 {list(num_classes)} 与当前标签体系 {num_classes_per_head()} "
-            "不一致，请确认 labels.yaml 未变更或重新训练（REQ-6.11-3）"
-        )
-    ckpt_categories = list(checkpoint.get("category_names") or [])
-    if ckpt_categories and ckpt_categories != _CATEGORY_NAMES:
-        raise ValueError(
-            f"存档分类头 {ckpt_categories} 与当前标签体系 {_CATEGORY_NAMES} 不一致"
-        )
+    checkpoint_io.validate_taxonomy(checkpoint)
+    saved_config = checkpoint.get("config")
+    epoch = checkpoint.get("epoch", 0)
+    if not isinstance(saved_config, dict) or type(epoch) is not int or epoch < 0:
+        raise ValueError("存档训练配置或轮次无效")
     if config is not None:
         cfg_backbone = str(config.get("backbone", architecture)).lower()
         if cfg_backbone != architecture:
@@ -641,12 +689,31 @@ def _load_resume_payload(
         "model_state": model_state,
         "optimizer_state": checkpoint.get("optimizer_state"),
         "scheduler_state": checkpoint.get("scheduler_state"),
-        "epoch": int(checkpoint.get("epoch") or 0),
+        "epoch": epoch,
         "best_metric": checkpoint.get("best_metric"),
         "architecture": architecture,
         "custom_model_path": checkpoint.get("custom_model_path"),
-        "config": dict(checkpoint.get("config") or {}),
+        "config": saved_config,
     }
+
+
+def _inherit_best_checkpoint(cfg: dict[str, Any], payload: dict[str, Any], destination: Path) -> float | None:
+    """Carry the existing best artifact only when the validation configuration matches."""
+    metric = payload.get("best_metric")
+    if metric is None or any(cfg[key] != payload["config"].get(key) for key in ("datasets", "val_split", "seed")):
+        return None
+    source = Path(cfg["resume_from"])
+    if source.stem.endswith("_latest"):
+        source = source.with_name(f"{source.stem.removesuffix('_latest')}_best{source.suffix}")
+    elif not source.stem.endswith("_best"):
+        return None
+    if not source.is_file() or source.resolve().parent != source.parent.resolve():
+        return None
+    with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".best-") as directory:
+        candidate = Path(directory) / "checkpoint.pth"
+        shutil.copyfile(source, candidate)
+        os.replace(candidate, destination)
+    return float(metric)
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +723,10 @@ def _load_resume_payload(
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+class TrainingBusyError(RuntimeError):
+    """当前训练进程已占用设备。"""
 
 
 class TrainManager:
@@ -671,6 +742,8 @@ class TrainManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._jobs: dict[str, dict[str, Any]] = {}
+        # 进程内存态任务表必须有界：只保留最近若干个已结束任务供前端回溯。
+        self._MAX_FINISHED_JOBS = 40
         # T14：指标/状态变化推送信号。训练线程只 set()（非阻塞），
         # WS 连接在各自事件循环侧 wait() + clear()（见 routers/training.py）。
         self._metrics_event = threading.Event()
@@ -690,6 +763,10 @@ class TrainManager:
         """
         cfg = normalize_config(config)
         payload = _load_resume_payload(cfg["resume_from"], cfg) if cfg["resume_from"] else None
+        if payload:
+            payload["override_lr"] = cfg["lr"] != payload["config"].get("lr")
+            if payload["custom_model_path"]:
+                cfg["custom_model_path"] = payload["custom_model_path"]
         items = _prepare_data(cfg["datasets"])
         return self._launch(cfg, items, payload)
 
@@ -700,11 +777,25 @@ class TrainManager:
         **追加**轮数）。存档结构/类别数/分类头与当前标签体系不一致 → ValueError。
         """
         payload = _load_resume_payload(checkpoint_path, config)
+        payload["override_lr"] = bool(config and "lr" in config)
         merged = {**payload["config"], **(config or {})}
+        if payload["custom_model_path"]:
+            merged["custom_model_path"] = payload["custom_model_path"]
         cfg = normalize_config(merged)
         cfg["resume_from"] = str(checkpoint_path)
         items = _prepare_data(cfg["datasets"])
         return self._launch(cfg, items, payload)
+
+    def _prune_finished_locked(self) -> None:
+        """保持内存任务表有界：仅裁剪已结束任务，调用方必须已持有 self._lock。"""
+        finished = [job for job in self._jobs.values()
+                    if job["status"] in {"completed", "stopped", "failed"}]
+        overflow = len(finished) + 1 - self._MAX_FINISHED_JOBS
+        if overflow <= 0:
+            return
+        finished.sort(key=lambda job: job.get("finished_at") or job.get("created_at") or "")
+        for job in finished[:overflow]:
+            self._jobs.pop(job["job_id"], None)
 
     def _launch(
         self,
@@ -722,6 +813,7 @@ class TrainManager:
             "total_epochs": (payload["epoch"] if payload else 0) + cfg["epochs"],
             "current_epoch": payload["epoch"] if payload else 0,
             "device": "",
+            "gpu_count": None,
             "use_amp": False,
             "checkpoint_best": "",
             "checkpoint_latest": "",
@@ -738,10 +830,18 @@ class TrainManager:
             target=self._run, args=(job,), daemon=True, name=f"train-{job_id}"
         )
         with self._lock:
+            if any(existing["status"] == "running" for existing in self._jobs.values()):
+                raise TrainingBusyError("已有训练任务运行，请等待完成或停止后重试")
+            self._prune_finished_locked()
             self._jobs[job_id] = job
             job["thread"] = thread
             job["status"] = "running"
-        thread.start()
+            try:
+                thread.start()
+            except RuntimeError:
+                del self._jobs[job_id]
+                raise
+        self._metrics_event.set()
         return job_id
 
     # -- 查询 / 控制 --------------------------------------------------------
@@ -790,8 +890,8 @@ class TrainManager:
     def compute_eval(self, job_id: str) -> Optional[dict[str, Any]]:
         """评估结果（T14，REQ-6.13）：验证集混淆矩阵 + one-vs-rest ROC/AUC。
 
-        训练完成时已在后台线程算好并缓存于 job；缓存缺失（如任务被停止/跨进程
-        查询）且 latest 存档可用时，从存档重建模型对验证集重新计算一次。
+        训练完成时已在后台线程算好并缓存于 job；缓存缺失（如任务被停止）且
+        best 存档可用时，从存档重建模型对验证集重新计算一次。
 
         Returns:
             ``{"confusion": {类别: [[..]]}, "roc": {类别: {"fpr", "tpr", "auc"}}}``；
@@ -831,6 +931,7 @@ class TrainManager:
                 "total_epochs",
                 "current_epoch",
                 "device",
+                "gpu_count",
                 "use_amp",
                 "checkpoint_best",
                 "checkpoint_latest",
@@ -861,7 +962,7 @@ class TrainManager:
     def _run(self, job: dict[str, Any]) -> None:
         cfg: dict[str, Any] = job["config"]
         items: list[tuple[str, list[int]]] = job["_items"]
-        payload: Optional[dict[str, Any]] = job["_payload"]
+        payload: Optional[dict[str, Any]] = job.pop("_payload")
         stop_event: threading.Event = job["stop_event"]
         try:
             self._train(job, cfg, items, payload)
@@ -876,6 +977,8 @@ class TrainManager:
             if job["status"] == "running":
                 self._update(job, status="stopped", finished_at=_utcnow_iso())
             stop_event.clear()
+            # 数据集清单只服务于训练准备；结束后释放，避免任务表长期持有引用。
+            job.pop("_items", None)
 
     def _train(
         self,
@@ -889,7 +992,16 @@ class TrainManager:
         torch.manual_seed(cfg["seed"])
         device, n_gpus = resolve_device()
         use_amp = n_gpus > 0 and cfg["fp16"]  # 无 GPU → FP32（REQ-6.8-3）
-        self._update(job, device=str(device), use_amp=use_amp)
+        self._update(job, device=str(device), gpu_count=n_gpus, use_amp=use_amp)
+        peak_tracking = set()
+        if n_gpus:
+            torch.cuda.init()
+            for index in range(n_gpus):
+                try:
+                    torch.cuda.reset_peak_memory_stats(index)
+                except (RuntimeError, AttributeError):
+                    continue
+                peak_tracking.add(index)
 
         # 模型（T12 build_model；custom 走 load_custom_model + 输出契约包装；
         # 续训时 architecture 以存档为准）
@@ -904,20 +1016,18 @@ class TrainManager:
 
         loss_fn = _build_loss(cfg["loss"])
         optimizer = _build_optimizer(base_model, cfg)
-        if payload and payload.get("optimizer_state"):
-            optimizer.load_state_dict(payload["optimizer_state"])
-            for group in optimizer.param_groups:  # 配置 lr 优先于存档恢复值
-                group["lr"] = cfg["lr"]
         scheduler = _build_scheduler(optimizer, cfg)
-        if payload and payload.get("scheduler_state"):
-            scheduler.load_state_dict(payload["scheduler_state"])
+        if payload and cfg["optimizer"] == payload["config"].get("optimizer", "adam"):
+            if payload.get("optimizer_state"):
+                optimizer.load_state_dict(payload["optimizer_state"])
+                if payload["override_lr"]:
+                    for group in optimizer.param_groups:
+                        group["lr"] = cfg["lr"]
+            if payload.get("scheduler_state"):
+                scheduler.load_state_dict(payload["scheduler_state"])
         scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
         start_epoch = payload["epoch"] if payload else 0
-        best_metric: Optional[float] = (
-            float(payload["best_metric"]) if payload and payload.get("best_metric") is not None else None
-        )
-
         # 划分 train/val（seed 固定 → 续训与首训划分一致，best 判据可比）
         train_set, val_set = _split_train_val(items, cfg["val_split"], cfg["seed"])
 
@@ -945,13 +1055,16 @@ class TrainManager:
         model_dir.mkdir(parents=True, exist_ok=True)
         latest_path = model_dir / f"{job['job_id']}_latest.pth"
         best_path = model_dir / f"{job['job_id']}_best.pth"
+        best_metric = _inherit_best_checkpoint(cfg, payload, best_path) if payload and val_loader else None
         self._update(
             job,
             checkpoint_latest=str(latest_path),
             checkpoint_best=str(best_path),
         )
 
-        for epoch in range(start_epoch + 1, start_epoch + cfg["epochs"] + 1):
+        total_epochs = start_epoch + cfg["epochs"]
+        run_started = time.monotonic()
+        for epoch in range(start_epoch + 1, total_epochs + 1):
             if stop_event.is_set():
                 break
             train_loss, train_acc, train_per_head = self._train_epoch(
@@ -969,6 +1082,7 @@ class TrainManager:
                 val_loss, val_acc, val_per_head = None, None, [None] * len(category_names)
 
             scheduler.step()
+            elapsed = time.monotonic() - run_started
             metric = {
                 "epoch": epoch,
                 "train_loss": train_loss,
@@ -980,9 +1094,10 @@ class TrainManager:
                 "train_valid_per_head": [sum(items[j][1][i] != _MISSING_TARGET for j in train_set) for i in range(len(category_names))],
                 "val_valid_per_head": [sum(items[j][1][i] != _MISSING_TARGET for j in val_set) for i in range(len(category_names))],
                 "lr": float(optimizer.param_groups[0]["lr"]),
+                "eta_seconds": round(elapsed / (epoch - start_epoch) * (total_epochs - epoch), 1),
+                "gpu_metrics": _gpu_metrics(n_gpus, peak_tracking),
+                "recorded_at": _utcnow_iso(),
             }
-            self._append_metric(job, metric)
-
             # 无有效验证指标时不创建 best；均值仅包含有真值的任务头。
             if val_acc is not None and (best_metric is None or val_acc > best_metric):
                 best_metric = val_acc
@@ -995,6 +1110,7 @@ class TrainManager:
                 latest_path, base_model, optimizer, scheduler, epoch,
                 best_metric, cfg, list(num_classes), category_names,
             )
+            self._append_metric(job, metric)
 
         if stop_event.is_set():
             # 只从已完整结束的epoch恢复；不能把半轮参数保存成该轮已完成。
@@ -1043,11 +1159,14 @@ class TrainManager:
                 loss, valid_count = _masked_loss(outs, targets, loss_fn, category_names)
             if loss is None:
                 continue
+            batch_loss = float(loss.detach())
+            if not math.isfinite(batch_loss):
+                raise ValueError("训练损失出现非有限值，请检查输入、学习率或混合精度设置")
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
-            total_loss += float(loss.detach()) * valid_count
+            total_loss += batch_loss * valid_count
             count += valid_count
             with torch.no_grad():
                 for i, name in enumerate(category_names):
@@ -1081,7 +1200,10 @@ class TrainManager:
                     loss, valid_count = _masked_loss(outs, targets, loss_fn, category_names)
                 if loss is None:
                     continue
-                total_loss += float(loss.detach()) * valid_count
+                batch_loss = float(loss.detach())
+                if not math.isfinite(batch_loss):
+                    raise ValueError("验证损失出现非有限值，请检查输入或存档")
+                total_loss += batch_loss * valid_count
                 count += valid_count
                 for i, name in enumerate(category_names):
                     logits_acc[name].append(outs[name].detach().cpu())
@@ -1244,7 +1366,7 @@ def _compute_eval_from_probs(
 def _eval_from_checkpoint(
     cfg: dict[str, Any], items: list[tuple[str, list[int]]], checkpoint_path: str
 ) -> dict[str, Any]:
-    """从 latest 存档重建模型，对验证集计算评估（缓存缺失时的兜底路径）。
+    """从 best 存档重建模型，对验证集计算评估（缓存缺失时的兜底路径）。
 
     与训练线程使用同一 ``_split_train_val`` 划分，保证评估范围一致。
     """

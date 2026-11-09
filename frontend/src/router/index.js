@@ -9,7 +9,22 @@ const router = createRouter({
     { path: '/account', name: 'account', component: () => import('../views/Account.vue') },
     {
       path: '/',
-      redirect: '/datasets',
+      redirect: '/overview',
+    },
+    {
+      path: '/overview',
+      name: 'overview',
+      component: () => import('../views/Overview.vue'),
+    },
+    {
+      path: '/jobs',
+      name: 'jobs',
+      component: () => import('../views/Jobs.vue'),
+    },
+    {
+      path: '/artifacts',
+      name: 'artifacts',
+      component: () => import('../views/Artifacts.vue'),
     },
     {
       path: '/datasets',

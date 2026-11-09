@@ -1,15 +1,25 @@
 # GPU 冒烟清单（GPU Smoke Checklist）— T25
 
-> **本清单是 runbook，不是本地测试结果。**
-> 本地（Windows 开发机，`torch 2.14.0+cpu`，无 CUDA）只验证了 CPU 降级路径；
-> FP16 / DataParallel 真实路径必须在 GPU 服务器上人工执行本清单验证
-> （锁定决策 9：本地 CPU 降级路径用单测覆盖，多卡/FP16 真实路径用服务器冒烟覆盖）。
+> 本地 Windows 的 PyTorch 为 CPU 构建。真实 FP16 和 DataParallel 使用目标服务器上的隔离测试环境验证。
 >
 > **目标服务器**：`59.77.6.21`，SSH 端口 `6107`，用户 `ccl`（⚠️ 需校内网络）
 > **硬件**：2× NVIDIA GeForce RTX 3090（24GB each，driver 535.230.02）
 > **环境**：conda env `sizhen`（Python 3.10 + torch cu118，见 `docs/概要设计.md` §8.3）
 
 ---
+
+## V1.2 HTTP 黑盒入口
+
+在独立 GPU 环境安装 `backend/requirements.txt`（包括 GPU 版 PyTorch、torchvision 与 `nvidia-ml-py`），从仓库根目录执行。先核对物理卡使用情况，在有空闲算力时分别测试。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python backend/tests/run_blackbox.py --gpu-smoke 1
+CUDA_VISIBLE_DEVICES=0,1 python backend/tests/run_blackbox.py --gpu-smoke 2
+```
+
+该模式仅启动绑定回环地址的真实后端，用临时 SQLite 和合成图片，经登录及 HTTP API 提交单轮 ResNet18 FP16 作业。检查可见卡数、AMP、该轮结果和真实设备指标。将结果记入 [V1.2 验收记录](./V1.2-范围对齐与验收.md)。
+
+## 历史排障步骤
 
 ## 0. 前置：登入 + 代码同步 + 环境激活
 

@@ -7,6 +7,8 @@
 - ``POST /api/inference/predict``  请求体 ``{"model_path", "dataset_id"}`` →
   ``{"predictions": [{"filename", "predictions": [{"category","label",
   "confidence"} ×4]}]}``（REQ-6.16/6.17）；
+- ``POST /api/inference/jobs`` 启动后台批量任务（202），
+  ``GET /api/inference/jobs/{job_id}`` 返回进度与最终结果；
 - ``POST /api/inference/preannotation`` 请求体 ``{"model_path", "dataset_id"}``
   → ``{"generated": N}``（REQ-6.18）。
 
@@ -19,17 +21,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app import config
-from app.services import inference_service
+from app.services import checkpoint_io, inference_service
 
 router = APIRouter(prefix="/inference", tags=["inference"])
 
 # 训练 checkpoint 扩展名（T13 产物）；.onnx 等其它产物不在本列表（T19 职责）
-_CHECKPOINT_SUFFIXES = (".pth", ".pt")
+_CHECKPOINT_SUFFIXES = checkpoint_io.CHECKPOINT_SUFFIXES
 
 
 @router.get("/models")
@@ -48,7 +51,20 @@ class _InferenceIn(BaseModel):
     """预测/预标注请求体：模型（MODEL_DIR 内相对路径）+ 目标数据集。"""
 
     model_path: str = Field(min_length=1)
-    dataset_id: int
+    dataset_id: int = Field(gt=0)
+
+
+class _PreannotationIn(_InferenceIn):
+    confidence_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class _BatchStatus(BaseModel):
+    job_id: str
+    status: Literal["running", "completed", "failed"]
+    processed: int
+    total: int
+    predictions: list[dict[str, Any]]
+    error: str | None
 
 
 def _resolve_model_path(model_path: str) -> Path:
@@ -56,21 +72,22 @@ def _resolve_model_path(model_path: str) -> Path:
 
     仅接受 MODEL_DIR 内的文件名/相对路径；绝对路径与 ``..`` 穿越一律拒绝。
     """
-    model_dir = config.MODEL_DIR.resolve()
-    requested = Path(model_path)
-    if requested.is_absolute():
-        raise HTTPException(status_code=400, detail="model_path 仅支持模型目录内的相对路径")
-    resolved = (model_dir / requested).resolve()
-    if resolved != model_dir and model_dir not in resolved.parents:
-        raise HTTPException(status_code=400, detail="model_path 越出模型目录（非法路径）")
+    try:
+        return checkpoint_io.resolve_managed_path(model_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _existing_model_path(model_path: str) -> Path:
+    resolved = _resolve_model_path(model_path)
+    if not resolved.is_file():
+        raise HTTPException(status_code=404, detail=f"模型文件不存在：{model_path}")
     return resolved
 
 
 def _load_or_404(model_path: str) -> tuple[object, dict]:
     """解析 + 加载 checkpoint：文件缺失 → 404；结构无法识别 → 400。"""
-    resolved = _resolve_model_path(model_path)
-    if not resolved.is_file():
-        raise HTTPException(status_code=404, detail=f"模型文件不存在：{model_path}")
+    resolved = _existing_model_path(model_path)
     try:
         return inference_service.load_model_from_dir(str(resolved))
     except ValueError as exc:
@@ -83,19 +100,56 @@ def predict(payload: _InferenceIn) -> dict[str, list[dict]]:
     model, _meta = _load_or_404(payload.model_path)
     try:
         predictions = inference_service.predict_dataset(payload.dataset_id, model)
-    except ValueError as exc:
+    except inference_service.DatasetNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"predictions": predictions}
 
 
+@router.post(
+    "/jobs",
+    status_code=202,
+    responses={409: {"description": "已有批量推理任务在运行"}},
+)
+def start_batch(payload: _InferenceIn, response: Response) -> dict[str, str]:
+    """接受批量推理任务，通过 Location 查询处理进度和结果。"""
+    path = _existing_model_path(payload.model_path)
+    try:
+        job_id = inference_service.batch_jobs.start(payload.dataset_id, path)
+    except inference_service.DatasetNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except inference_service.BatchInferenceBusy as exc:
+        raise HTTPException(status_code=409, detail="已有批量推理任务在运行") from exc
+    response.headers["Location"] = f"/api/inference/jobs/{job_id}"
+    return {"job_id": job_id}
+
+
+@router.get("/jobs")
+def list_batches() -> dict[str, list[dict[str, Any]]]:
+    """作业中心：最近批量推理任务摘要（不含整批预测）。"""
+    return {"items": inference_service.batch_jobs.list()}
+
+
+@router.get("/jobs/{job_id}", response_model=_BatchStatus)
+def get_batch(job_id: str) -> dict[str, Any]:
+    """查询当前批次。完成后返回与同步预测接口相同的预测项。"""
+    status = inference_service.batch_jobs.status(job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="批量推理任务不存在或结果已过期")
+    return status
+
+
 @router.post("/preannotation")
-def preannotation(payload: _InferenceIn) -> dict[str, int]:
+def preannotation(payload: _PreannotationIn) -> dict[str, int]:
     """基于预测生成预标注 XML（仅未人工标注图片），返回生成数量（REQ-6.18）。"""
     model, _meta = _load_or_404(payload.model_path)
     try:
         generated = inference_service.generate_preannotation_xml(
-            payload.dataset_id, model
+            payload.dataset_id, model, confidence_threshold=payload.confidence_threshold
         )
-    except ValueError as exc:
+    except inference_service.DatasetNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"generated": generated}

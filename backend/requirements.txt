@@ -5,6 +5,7 @@ pydantic
 python-multipart
 torch
 torchvision
+nvidia-ml-py
 onnx
 onnxruntime
 scikit-learn

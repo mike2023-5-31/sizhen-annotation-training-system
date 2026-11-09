@@ -5,8 +5,7 @@
   字面量匹配，`%`/`_` 不作通配符）；
 - ``get_image_path``：图片绝对路径（来自 ``Record.image_path``，存储约定
   ``data/datasets/<dataset_id>/<filename>``）；
-- ``read_labels``：图片同名 ``.xml`` → dict（``xml_io.read_xml``），XML 缺失抛
-  ``ValueError``（router 转 404）。
+- ``read_labels``：返回图片元数据与同名 XML 的内容；无 XML 时返回可用于首次保存的空标注。
 
 与数据集服务同约定：每个函数自管 Session（``SessionLocal`` 上下文）；
 目标不存在 → 抛 ``ValueError``（router 转 404）。
@@ -17,6 +16,7 @@ URL 中的 filename 只是查询键，天然杜绝路径穿越。
 from __future__ import annotations
 
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 from sqlalchemy import func, select
@@ -51,15 +51,14 @@ def search_images(dataset_id: int, q: str) -> list[str]:
             select(Record.filename)
             .where(
                 Record.dataset_id == dataset_id,
-                func.lower(Record.filename).contains(q.lower()),
+                func.lower(Record.filename).contains(q.lower(), autoescape=True),
             )
             .order_by(Record.filename)
         )
         return list(db.scalars(stmt).all())
 
 
-def get_image_path(dataset_id: int, filename: str) -> Path:
-    """图片绝对路径（来自 ``Record.image_path``）。记录不存在 → ValueError。"""
+def _get_record(dataset_id: int, filename: str) -> Record:
     with SessionLocal() as db:
         rec = db.scalars(
             select(Record).where(
@@ -69,16 +68,32 @@ def get_image_path(dataset_id: int, filename: str) -> Path:
         ).first()
         if rec is None:
             raise ValueError(f"图片 {filename} 不存在于数据集 {dataset_id}")
-        return Path(rec.image_path)
+        return rec
+
+
+def get_image_path(dataset_id: int, filename: str) -> Path:
+    """图片绝对路径（来自 ``Record.image_path``）。记录不存在 → ValueError。"""
+    return Path(_get_record(dataset_id, filename).image_path)
 
 
 def read_labels(dataset_id: int, filename: str) -> dict[str, Any]:
-    """读取图片同名 XML 标注 → dict（folder/filename/path/size/quality/labels）。
-
-    图片记录不存在或同名 XML 缺失 → ValueError（router 转 404）。
-    """
-    image_path = get_image_path(dataset_id, filename)
+    """读取同名 XML 标注与图片记录的文件大小和记录时间。"""
+    record = _get_record(dataset_id, filename)
+    image_path = Path(record.image_path)
+    try:
+        image_stat = image_path.stat()
+        file_size = image_stat.st_size if S_ISREG(image_stat.st_mode) else None
+    except (FileNotFoundError, NotADirectoryError):
+        file_size = None
     xml_path = image_path.with_suffix(".xml")
-    if not xml_path.is_file():
-        raise ValueError(f"图片 {filename} 无标注 XML")
-    return xml_io.read_versioned_xml(xml_path)
+    try:
+        labels = xml_io.read_versioned_xml(xml_path)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        if file_size is None:
+            raise ValueError(f"图片和标注文件缺失: {filename}") from exc
+        labels = {"filename": filename, "labels": [], "quality": record.quality or "",
+                  "revision": "missing", "annotation_state": "未标注"}
+    labels["file_size_bytes"] = file_size
+    labels["record_timestamp"] = record.timestamp.isoformat() + "Z" if record.timestamp else None
+    labels.setdefault("collector_alias", None)
+    return labels

@@ -1,6 +1,10 @@
 <template>
   <el-card class="login-card">
-    <h1>登录平台</h1>
+    <div class="login-brand">
+      <span aria-hidden="true">诊</span>
+      四诊数据标注与 AI 模型训练
+    </div>
+    <h1>登录四诊工作台</h1>
     <p>使用管理员为你创建的独立账号，保存和追踪标注修改。</p>
     <el-form label-position="top" @submit.prevent="login">
       <el-form-item label="账号"><el-input v-model="username" autocomplete="username" aria-label="账号" /></el-form-item>
@@ -8,7 +12,7 @@
       <el-alert v-if="error" :title="error" type="error" :closable="false" />
       <el-button type="primary" native-type="submit" :loading="busy">登录</el-button>
     </el-form>
-    <p class="help">首次使用或忘记密码，请联系平台管理员。</p>
+    <p class="help">首次使用或忘记密码时，请联系平台管理员。</p>
   </el-card>
 </template>
 <script setup>
@@ -31,9 +35,56 @@ async function login() {
 }
 </script>
 <style scoped>
-.login-card { max-width: calc(var(--ts-space-16) * 8); margin: var(--ts-space-10) auto; }
-h1 { font-size: 1.375rem; font-weight: 600; color: var(--ts-text-primary); }
-p { color: var(--ts-text-secondary); }
-.el-button { margin-top: var(--ts-space-4); }
-.help { font-size: .8125rem; }
+.login-card {
+  width: min(100%, calc(var(--ts-space-16) * 7));
+  margin-inline: auto;
+}
+
+.login-card :deep(.el-card__body) {
+  padding: clamp(var(--ts-space-4), 5vw, var(--ts-space-8));
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-3);
+  color: var(--ts-text-secondary);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.login-brand span {
+  display: grid;
+  place-items: center;
+  width: var(--ts-space-8);
+  height: var(--ts-space-8);
+  border-radius: var(--ts-radius-sm);
+  background: var(--ts-blue-soft);
+  color: var(--ts-blue);
+}
+
+h1 {
+  margin: var(--ts-space-6) 0 var(--ts-space-2);
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+p {
+  margin: 0 0 var(--ts-space-6);
+  color: var(--ts-text-secondary);
+  line-height: 1.5;
+}
+
+.el-button {
+  width: 100%;
+}
+
+.el-alert {
+  margin-bottom: var(--ts-space-3);
+}
+
+.help {
+  margin: var(--ts-space-4) 0 0;
+  font-size: 0.8125rem;
+}
 </style>

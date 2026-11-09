@@ -5,21 +5,26 @@
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from pathlib import Path
 
 import pytest
+import torch
 import torchvision.models as tvm
 from fastapi.testclient import TestClient
 from PIL import Image
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from starlette.websockets import WebSocket
 
 from app.db import Base
+from app import config
 from app.labels_config import CATEGORIES
 from app.main import app
 from app.models.orm import Dataset, Record
+from app.routers.training import ws_training
 from app.services import train_service, xml_io
 
 CATEGORY_NAMES = [c["name"] for c in CATEGORIES]
@@ -119,6 +124,49 @@ def _base_config(ds_ids: list[int], model_dir: Path) -> dict:
         "seed": 0,
         "model_dir": str(model_dir),
     }
+
+
+def test_resume_rejects_outside_model_dir(tmp_path, monkeypatch, client):
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    monkeypatch.setattr(config, "MODEL_DIR", model_dir)
+    outside = tmp_path / "other.pth"
+    torch.save({}, outside)
+    response = client.post("/api/training/resume", json={"checkpoint_path": str(outside)})
+    assert response.status_code == 400
+    assert "模型目录" in response.json()["detail"]
+
+
+def test_resume_rejects_corrupt_checkpoint(tmp_path, monkeypatch, client):
+    monkeypatch.setattr(config, "MODEL_DIR", tmp_path)
+    (tmp_path / "corrupt.pth").write_bytes(b"invalid checkpoint")
+    response = client.post("/api/training/resume", json={"checkpoint_path": "corrupt.pth"})
+    assert response.status_code == 400
+    assert "无法读取存档" in response.json()["detail"]
+
+
+def test_training_rejects_competing_job(tmp_path, db, monkeypatch, client):
+    monkeypatch.setattr(config, "MODEL_DIR", tmp_path / "models")
+    dataset_id = _add_dataset(db, tmp_path, "busy", ["a.png"], {"a.png": [("舌", "舌苔黄")]})
+    entered = threading.Event()
+    release = threading.Event()
+    manager = train_service.TrainManager()
+    monkeypatch.setattr(train_service, "train_manager", manager)
+
+    def wait_for_release(*_):
+        entered.set()
+        assert release.wait(10)
+
+    monkeypatch.setattr(manager, "_train", wait_for_release)
+    first = client.post("/api/training/start", json={"datasets": [dataset_id]})
+    assert first.status_code == 200
+    try:
+        assert entered.wait(10)
+        second = client.post("/api/training/start", json={"datasets": [dataset_id]})
+        assert second.status_code == 409
+    finally:
+        release.set()
+        manager.wait(first.json()["job_id"], timeout=10)
 
 
 def _assert_eval_structure(body: dict) -> None:
@@ -240,6 +288,48 @@ def test_eval_empty_val_no_crash(tmp_path: Path, db, client: TestClient) -> None
     r = client.get(f"/api/training/eval/{job_id}")
     assert r.status_code == 200
     assert r.json() == {"confusion": {}, "roc": {}}
+
+
+def test_idle_training_socket_ends_on_client_disconnect() -> None:
+    async def disconnect_idle_socket() -> None:
+        incoming = asyncio.Queue()
+        outgoing = asyncio.Queue()
+        socket = WebSocket({"type": "websocket"}, incoming.get, outgoing.put)
+        await incoming.put({"type": "websocket.connect"})
+        handler = asyncio.create_task(ws_training(socket))
+        assert (await asyncio.wait_for(outgoing.get(), timeout=2))["type"] == "websocket.accept"
+        assert (await asyncio.wait_for(outgoing.get(), timeout=2))["type"] == "websocket.send"
+        await incoming.put({"type": "websocket.disconnect", "code": 1000})
+        await asyncio.wait_for(handler, timeout=2)
+
+    asyncio.run(disconnect_idle_socket())
+
+
+def test_training_capabilities_exposes_devices_with_optional_telemetry(client, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda index: SimpleNamespace(
+        name=f"Test GPU {index}", total_memory=1024 * (index + 1),
+    ))
+    monkeypatch.setattr(torch.cuda, "utilization", lambda index: 0 if index == 0 else 75)
+
+    def temperature(index):
+        if index == 0:
+            raise RuntimeError("NVML sensor unavailable")
+        return 48
+
+    monkeypatch.setattr(torch.cuda, "temperature", temperature)
+    response = client.get("/api/training/capabilities")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "device": "cuda:0", "gpu_count": 2, "parallel_mode": "data_parallel", "devices": [
+            {"index": 0, "name": "Test GPU 0", "total_bytes": 1024, "status": "detected",
+             "temperature_c": None, "utilization_percent": 0},
+            {"index": 1, "name": "Test GPU 1", "total_bytes": 2048, "status": "detected",
+             "temperature_c": 48, "utilization_percent": 75},
+        ],
+    }
 
 
 def test_status_unknown_job_returns_empty(client: TestClient) -> None:

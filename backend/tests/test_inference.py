@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import collections
 from pathlib import Path
+from threading import Event
+import time
 
 import pytest
 import torch
 import torchvision.models as tvm
+from fastapi.testclient import TestClient
 from PIL import Image
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.labels_config import CATEGORIES
+from app.main import app
 from app.models.factory import build_model
 from app.models.orm import Dataset, Record
 from app.services import inference_service, xml_io
@@ -166,6 +170,33 @@ def test_load_non_dict_raises(tmp_path: Path) -> None:
 def test_load_missing_file_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="不存在"):
         inference_service.load_model_from_dir(str(tmp_path / "nope.pth"))
+
+
+def test_load_checkpoint_does_not_retry_with_pickle(tmp_path, monkeypatch):
+    path = tmp_path / "broken.pth"
+    path.write_bytes(b"broken")
+    original = torch.load
+    attempts = []
+
+    def tracked_load(*args, **kwargs):
+        attempts.append(kwargs["weights_only"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", tracked_load)
+    with pytest.raises(ValueError, match="无法读取存档"):
+        inference_service.load_model_from_dir(str(path))
+    assert attempts == [True]
+
+
+def test_checkpoint_rejects_same_length_label_reordering(tmp_path, monkeypatch):
+    path = _save_checkpoint(tmp_path / "wrong-order.pth", _build_resnet18(monkeypatch))
+    checkpoint = torch.load(path, weights_only=True)
+    checkpoint["class_labels"] = [list(c["labels"]) for c in CATEGORIES]
+    checkpoint["class_labels"][0].reverse()
+    torch.save(checkpoint, path)
+
+    with pytest.raises(ValueError, match="子标签或顺序"):
+        inference_service.load_model_from_dir(str(path))
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +366,74 @@ def test_preannotation_skips_all_manual(db_session_factory, monkeypatch) -> None
     model = _build_resnet18(monkeypatch)
     assert inference_service.generate_preannotation_xml(dataset_id, model) == 0
     assert len(xml_io.read_xml(imgs_dir / "m.xml")["labels"]) == 1
+
+
+def test_preannotation_preserves_human_clear(db_session_factory, monkeypatch):
+    dataset_id, folder = _add_dataset(db_session_factory, "清空人工标注", ["a.jpg"])
+    path = folder / "a.xml"
+    xml_io.write_xml(path, {"filename": "a.jpg", "labels": [], "annotation_source": "human"})
+    before = path.read_bytes()
+
+    generated = inference_service.generate_preannotation_xml(dataset_id, _build_resnet18(monkeypatch))
+
+    assert generated == 0
+    assert path.read_bytes() == before
+
+
+def test_preannotation_skips_all_heads_below_threshold(db_session_factory, monkeypatch):
+    dataset_id, folder = _add_dataset(db_session_factory, "阈值集", ["a.jpg"])
+    model = _build_resnet18(monkeypatch)
+    for parameter in model.parameters():
+        parameter.data.zero_()
+
+    assert inference_service.generate_preannotation_xml(dataset_id, model, confidence_threshold=1.0) == 0
+    assert not (folder / "a.xml").exists()
+
+
+def test_batch_job_reports_progress_and_rejects_parallel_submission(
+    db_session_factory, monkeypatch, login_admin,
+) -> None:
+    from app import config
+
+    root = db_session_factory
+    dataset_id, _ = _add_dataset(root, "jobs", [f"{i:02}.png" for i in range(17)])
+    monkeypatch.setattr(config, "MODEL_DIR", root)
+    _save_checkpoint(root / "job.pth", _build_resnet18(monkeypatch))
+    second_batch = Event()
+    release = Event()
+    original = inference_service._predict_batch
+
+    def run_batch(model, batch):
+        if len(batch) == 1:
+            second_batch.set()
+            assert release.wait(20)
+        return original(model, batch)
+
+    monkeypatch.setattr(inference_service, "_predict_batch", run_batch)
+    payload = {"dataset_id": dataset_id, "model_path": "job.pth"}
+    with TestClient(app) as client:
+        login_admin(client)
+        response = client.post("/api/inference/jobs", json=payload)
+        assert response.status_code == 202, response.text
+        url = response.headers["Location"]
+        try:
+            assert second_batch.wait(20)
+            active = client.get(url).json()
+            assert (active["status"], active["processed"], active["total"]) == ("running", 16, 17)
+            assert active["predictions"] == []
+            assert client.post("/api/inference/jobs", json=payload).status_code == 409
+        finally:
+            release.set()
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            result = client.get(url).json()
+            if result["status"] == "completed":
+                break
+            assert result["status"] != "failed", result
+            time.sleep(0.05)
+        assert result["status"] == "completed"
+        assert result["processed"] == 17 and len(result["predictions"]) == 17
+        assert len(result["predictions"][0]["predictions"]) == 4
 
 
 def test_preannotation_unknown_dataset_raises(db_session_factory, monkeypatch) -> None:

@@ -98,7 +98,7 @@ npm install
 npm run dev
 ```
 
-前端 dev server 监听 `http://localhost:5173`，Vite 将 `/api` 与 `/ws` 代理到 `http://localhost:8000`。后端地址变化时，在启动 Vite 前设置 `VITE_API_TARGET`。
+前端 dev server 监听 `http://localhost:5173`，Vite 将 `/api`、训练 WebSocket 和受保护的 `/static/` 请求转发到 `http://localhost:8000`。后端地址变化时，在启动 Vite 前设置 `VITE_API_TARGET`。
 
 纯本地 HTTP 开发时，启动后端前可设置（生产/共享部署保持默认 `true` 即可）：
 
@@ -117,7 +117,7 @@ $env:AUTH_ALLOWED_ORIGINS='http://localhost:5173,http://127.0.0.1:5173'
 
 ## 测试
 
-**后端（pytest）**：在 `backend/` 目录下执行（共 137 项，见 docs/测试报告.md）：
+**后端（pytest）**：在 `backend/` 目录下执行：
 
 ```bash
 ..\.venv\Scripts\python.exe -m pytest tests/ -q
@@ -130,6 +130,16 @@ $env:AUTH_ALLOWED_ORIGINS='http://localhost:5173,http://127.0.0.1:5173'
 ```
 
 后端浏览器测试（`backend/tests/browser_*.py`）依赖 Playwright，先 `pip install -r backend/requirements-dev.txt`。
+
+V1.2 黑盒验收从项目根目录执行。它启动隔离 SQLite、真实 Uvicorn 和构建后的前端，依次运行数据、训练和浏览器用例。首次运行先安装前端依赖和 Playwright 浏览器。
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend/requirements-dev.txt
+.\.venv\Scripts\python.exe -m playwright install chromium
+.\.venv\Scripts\python.exe backend/tests/run_blackbox.py
+```
+
+单独复验可追加 `--steps data`、`--steps training` 或 `--steps browser`。浏览器的内置模型转换用例需要同轮训练产物，请按 `--steps training browser` 执行。
 
 **前端（node:test）**：在项目根目录执行：
 
@@ -144,6 +154,7 @@ node --test frontend/tests/annotationQueue.test.mjs
 | [docs/部署文档.md](docs/部署文档.md) | 环境要求、本地/远程 GPU 部署、环境变量、升级迁移、常见问题 |
 | [docs/用户手册.md](docs/用户手册.md) | 各页面操作指南、快捷键、常见问题、需求条目对照 |
 | [docs/需求规格说明书.md](docs/需求规格说明书.md) | 功能需求规格（6.1 至 6.21） |
+| [docs/V1.2-范围对齐与验收.md](docs/V1.2-范围对齐与验收.md) | 两仓库范围、实现证据、验收差距和任务分工 |
 | [docs/概要设计.md](docs/概要设计.md) | 系统概要设计 |
 | [docs/详细设计.md](docs/详细设计.md) | 模块详细设计 |
 | [docs/annotation-schema.md](docs/annotation-schema.md) | 标注 XML schema 定义（示例见 annotation-schema.sample.xml） |

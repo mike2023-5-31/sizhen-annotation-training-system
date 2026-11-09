@@ -13,6 +13,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+from xml.etree.ElementTree import ParseError
 
 from PIL import Image
 from sqlalchemy import select
@@ -20,10 +21,10 @@ from sqlalchemy import select
 from app import config
 from app.db import SessionLocal
 from app.labels_config import CATEGORIES
-from app.models.orm import Dataset, Record
+from app.models.orm import Dataset, ImportBatch, Record
 from app.services import xml_io
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
+IMAGE_FORMATS = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG", ".bmp": "BMP", ".gif": "GIF"}
 XML_EXTENSION = ".xml"
 
 
@@ -32,7 +33,7 @@ class ImportValidationError(ValueError):
 
 
 def _is_image(name: str) -> bool:
-    return PurePosixPath(name).suffix.lower() in IMAGE_EXTENSIONS
+    return PurePosixPath(name).suffix.lower() in IMAGE_FORMATS
 
 
 def _safe_name(info: zipfile.ZipInfo) -> str:
@@ -61,6 +62,9 @@ def _resolve_timestamp(value: Any, image_on_disk: Path) -> datetime:
 
 def _image_size(path: Path) -> dict[str, int]:
     with Image.open(path) as image:
+        suffix = path.suffix.lower()
+        if image.format != IMAGE_FORMATS[suffix]:
+            raise ValueError(f"实际图片格式 {image.format} 与文件扩展名 {suffix} 不符")
         if image.width * image.height > config.MAX_IMAGE_PIXELS:
             raise ValueError("图片像素数超过限制")
         image.verify()
@@ -93,11 +97,22 @@ def _signature(data: dict) -> tuple:
     )))
 
 
-def import_zip(dataset_id: int, zip_bytes: bytes) -> dict[str, Any]:
+def _matches_annotation(path: Path, signature: tuple) -> bool:
+    try:
+        return _signature(xml_io.read_xml(path)) == signature
+    except (OSError, ValueError, ParseError):
+        # 既有 XML 损坏或缺失时保护原始记录，不能覆盖，也不阻塞本批次其他图片。
+        return False
+
+
+def import_zip(
+    dataset_id: int, zip_bytes: bytes, source_filename: str | None = None, actor_id: str | None = None,
+) -> dict[str, Any]:
     if len(zip_bytes) > config.MAX_UPLOAD_BYTES:
         raise ImportValidationError("ZIP 超过上传大小限制")
     imported, initialized, duplicates = 0, 0, 0
     skipped, errors, mappings = [], [], []
+    batch_filename = PurePosixPath(source_filename.replace("\\", "/")).name[:255] if source_filename else None
     created: list[Path] = []
     config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     with SessionLocal() as db, tempfile.TemporaryDirectory(dir=config.UPLOAD_DIR, prefix="import-") as temporary:
@@ -171,7 +186,8 @@ def import_zip(dataset_id: int, zip_bytes: bytes) -> dict[str, Any]:
                     continue
                 xml_path = extracted[xml_key][1] if xml_key else None
                 try:
-                    data = xml_io.read_xml(xml_path) if xml_path else {"labels": [], "quality": ""}
+                    data = (xml_io.read_xml(xml_path, strict_collector_alias=True)
+                            if xml_path else {"labels": [], "quality": ""})
                     _validate_annotation(data)
                 except Exception as exc:
                     errors.append(f"{name}: XML 解析失败或标注无效: {exc}")
@@ -179,9 +195,8 @@ def import_zip(dataset_id: int, zip_bytes: bytes) -> dict[str, Any]:
                 digest = hashlib.sha256(source.read_bytes()).hexdigest()
                 existing_xml = by_hash.get(digest, [])
                 if existing_xml:
-                    matching = any(path.is_file() and _signature(xml_io.read_xml(path)) == _signature(data)
-                                   for path in existing_xml)
-                    if matching or xml_path is None:
+                    signature = _signature(data)
+                    if xml_path is None or any(_matches_annotation(path, signature) for path in existing_xml):
                         skipped.append(name)
                         duplicates += 1
                     else:
@@ -224,6 +239,8 @@ def import_zip(dataset_id: int, zip_bytes: bytes) -> dict[str, Any]:
                 initialized += int(xml_path is None)
             if not candidates and not errors:
                 raise ImportValidationError("ZIP 不含有效的候选图片")
+            db.add(ImportBatch(dataset_id=dataset_id, source="zip", filename=batch_filename, actor_id=actor_id,
+                               imported=imported, skipped=len(skipped), errors=len(errors)))
             db.commit()
         except BaseException:
             db.rollback()

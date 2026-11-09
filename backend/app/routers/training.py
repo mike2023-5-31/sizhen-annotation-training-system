@@ -19,23 +19,29 @@
 经线程池 ``wait(timeout)`` 唤醒，按各自游标对 metrics 缓冲做 diff 增量发送，
 每个连接互不影响。
 
-错误映射：任务不存在 → 404；训练未完成/评估暂不可用 → 409；配置非法 /
+错误映射：任务不存在 → 404；设备已占用/评估暂不可用 → 409；配置非法 /
 taxonomy 校验失败 / 存档非法（同步 ValueError）→ 400。
 """
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+import time
+from contextlib import suppress
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from app.services import train_service
+from app import config
+from app.services import checkpoint_io, train_service
 
 router = APIRouter(prefix="/training", tags=["training"])
 
 # WS 每次等待推送信号的超时（秒）：既是唤醒等待，也是断线/兜底轮询节拍
 _WS_WAIT_TIMEOUT = 0.5
+# 空闲保活间隔（秒）：低于反向代理常见的 60-90s 读超时，避免 epoch 间隔过长被断开
+_WS_HEARTBEAT_SECONDS = 25
+_STATUS_FIELDS = ("status", "error", "finished_at", "device", "gpu_count", "use_amp")
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +57,7 @@ class TrainingConfigBody(BaseModel):
     """
 
     backbone: str = "resnet18"
+    custom_model_path: str | None = None
     lr: float = 1e-3
     batch_size: int = 16
     epochs: int = 10
@@ -67,6 +74,7 @@ class StartTrainingRequest(TrainingConfigBody):
     """POST /training/start 请求体：datasets 必填（首个为主训练集，REQ-6.6）。"""
 
     datasets: list[int]
+    resume_from: str | None = None
 
 
 class ResumeTrainingRequest(TrainingConfigBody):
@@ -77,6 +85,22 @@ class ResumeTrainingRequest(TrainingConfigBody):
     """
 
     checkpoint_path: str
+
+
+class TrainingGPU(BaseModel):
+    index: int
+    name: str | None
+    total_bytes: int | None
+    status: Literal["detected", "unavailable"]
+    temperature_c: int | None
+    utilization_percent: int | None
+
+
+class TrainingCapabilities(BaseModel):
+    device: str
+    gpu_count: int
+    parallel_mode: Literal["cpu", "single_gpu", "data_parallel"]
+    devices: list[TrainingGPU]
 
 
 def _value_error_to_400(exc: ValueError) -> HTTPException:
@@ -97,7 +121,12 @@ def start_job(body: StartTrainingRequest) -> dict[str, str]:
     失败 → ValueError → 400，不创建任务。
     """
     try:
-        job_id = train_service.start_training(body.model_dump())
+        options = body.model_dump()
+        if body.resume_from:
+            options["resume_from"] = str(checkpoint_io.resolve_managed_path(body.resume_from, allow_absolute=True))
+        job_id = train_service.start_training(options)
+    except train_service.TrainingBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise _value_error_to_400(exc) from exc
     return {"job_id": job_id}
@@ -124,9 +153,11 @@ def resume_job(body: ResumeTrainingRequest) -> dict[str, str]:
     """
     overrides = body.model_dump(exclude_unset=True, exclude={"checkpoint_path"})
     try:
-        job_id = train_service.resume_training(
-            body.checkpoint_path, overrides or None
-        )
+        path = checkpoint_io.resolve_managed_path(body.checkpoint_path, allow_absolute=True)
+        overrides["model_dir"] = str(config.MODEL_DIR)
+        job_id = train_service.resume_training(str(path), overrides)
+    except train_service.TrainingBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise _value_error_to_400(exc) from exc
     return {"job_id": job_id}
@@ -136,6 +167,12 @@ def resume_job(body: ResumeTrainingRequest) -> dict[str, str]:
 def get_status(job_id: Optional[str] = None) -> dict[str, list[dict[str, Any]]]:
     """当前训练任务状态 + 指标缓冲（轮询兜底，REQ-6.12-4）。"""
     return train_service.train_manager.get_metrics(job_id)
+
+
+@router.get("/capabilities", response_model=TrainingCapabilities)
+def get_capabilities() -> dict[str, Any]:
+    """报告训练进程能检测到的设备和当前遥测。"""
+    return train_service.training_capabilities()
 
 
 @router.get("/eval/{job_id}")
@@ -160,22 +197,34 @@ async def ws_training(websocket: WebSocket) -> None:
     帧协议：
     - ``{"type": "snapshot", "jobs": [...]}`` 连接时全量（含 metrics 缓冲）；
     - ``{"type": "metrics", "job_id", "metrics": [新增轮次...]}`` 每 epoch 一条；
-    - ``{"type": "status", "job_id", "status", "error", "finished_at"}`` 状态变化。
+    - ``{"type": "status", "job_id", "status", "error", "finished_at", "device", "gpu_count", "use_amp"}``
+      状态或设备信息变化；
+    - ``{"type": "heartbeat"}`` 空闲保活帧（客户端忽略未知帧）。
     """
     await websocket.accept()
     manager = train_service.train_manager
     cursor: dict[str, int] = {}
-    last_status: dict[str, str] = {}
+    last_status: dict[str, dict[str, Any]] = {}
+
+    async def wait_for_disconnect() -> None:
+        while (await websocket.receive())["type"] != "websocket.disconnect":
+            pass
+
+    disconnected = asyncio.create_task(wait_for_disconnect())
     try:
         snapshot = manager.get_metrics()
         for job in snapshot["jobs"]:
             cursor[job["job_id"]] = len(job["metrics"])
-            last_status[job["job_id"]] = job["status"]
+            last_status[job["job_id"]] = {field: job.get(field) for field in _STATUS_FIELDS}
         await websocket.send_json({"type": "snapshot", "jobs": snapshot["jobs"]})
+        last_sent = time.monotonic()
 
-        while True:
+        while not disconnected.done():
             await asyncio.to_thread(manager.metrics_event.wait, _WS_WAIT_TIMEOUT)
+            if disconnected.done():
+                break
             manager.metrics_event.clear()
+            sent = False
             for job in manager.list_jobs():
                 job_id = job["job_id"]
                 metrics = job["metrics"]
@@ -185,16 +234,23 @@ async def ws_training(websocket: WebSocket) -> None:
                     await websocket.send_json(
                         {"type": "metrics", "job_id": job_id, "metrics": metrics[seen:]}
                     )
-                if job["status"] != last_status.get(job_id):
-                    last_status[job_id] = job["status"]
+                    sent = True
+                status = {field: job.get(field) for field in _STATUS_FIELDS}
+                if status != last_status.get(job_id):
+                    last_status[job_id] = status
                     await websocket.send_json(
-                        {
-                            "type": "status",
-                            "job_id": job_id,
-                            "status": job["status"],
-                            "error": job.get("error"),
-                            "finished_at": job.get("finished_at"),
-                        }
+                        {"type": "status", "job_id": job_id, **status}
                     )
+                    sent = True
+            now = time.monotonic()
+            if sent:
+                last_sent = now
+            elif now - last_sent >= _WS_HEARTBEAT_SECONDS:
+                await websocket.send_json({"type": "heartbeat"})
+                last_sent = now
     except WebSocketDisconnect:
         return
+    finally:
+        disconnected.cancel()
+        with suppress(asyncio.CancelledError):
+            await disconnected

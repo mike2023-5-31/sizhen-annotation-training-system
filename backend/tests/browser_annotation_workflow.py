@@ -103,7 +103,7 @@ def run():
         history = context.request.get(first_url.replace("/labels", "/history")).json()
         assert history["items"][0]["username"] == os.environ["BROWSER_TEST_USERNAME"]
         page.screenshot(path=str(OUTPUT / "annotation-history.png"), full_page=True)
-        page.get_by_role("button", name="Close this dialog").click()
+        page.get_by_role("button", name="关闭此对话框").click()
         assert not errors, errors
         page.screenshot(path=str(OUTPUT / "annotation-restored.png"), full_page=True)
         (OUTPUT / "result.json").write_text(json.dumps({

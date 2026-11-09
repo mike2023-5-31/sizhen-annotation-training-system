@@ -6,7 +6,7 @@
         <span v-if="datasetId" class="dataset-chip">数据集 #{{ datasetId }}</span>
       </div>
       <p class="page-sub">
-        逐图勾选四诊标签（每类单选）· ←/→ 翻图 · 1–4 定位类别 · Q 质量 · S 保存
+        逐图选择四诊标签。每类可选一项，标签和质量修改会自动保存。
       </p>
       <div class="dataset-picker">
         <el-select
@@ -53,8 +53,8 @@
               <div class="controls">
                 <el-button :disabled="currentIndex <= 0" @click="prev">上一张</el-button>
                 <el-slider
-                  :model-value="currentIndex"
-                  @change="goTo"
+                  v-model="sliderIndex"
+                  @change="jumpTo"
                   :min="0"
                   :max="images.length - 1"
                   :show-tooltip="false"
@@ -68,6 +68,20 @@
                 <span class="pos-index">{{ currentIndex + 1 }} / {{ images.length }}</span>
                 <span class="filename" :title="currentImage">{{ currentImage }}</span>
               </div>
+              <dl v-if="imageMeta" class="image-meta" aria-label="图片信息">
+                <div>
+                  <dt>记录时间</dt>
+                  <dd>{{ imageMeta.timestamp }}</dd>
+                </div>
+                <div>
+                  <dt>文件大小</dt>
+                  <dd>{{ imageMeta.size }}</dd>
+                </div>
+                <div>
+                  <dt>采集人（脱敏）</dt>
+                  <dd>{{ imageMeta.collector }}</dd>
+                </div>
+              </dl>
             </div>
 
             <div id="annotation-panel" class="panel">
@@ -157,6 +171,7 @@ const router = useRouter()
 
 const images = ref([])
 const currentIndex = ref(0)
+const sliderIndex = ref(0)
 const query = ref('')
 const loading = ref(false)
 const hasSearched = ref(false)
@@ -202,6 +217,7 @@ const imageSrc = computed(() =>
 const treeRef = ref(null)
 const treeData = ref([])
 const quality = ref('')
+const imageMeta = ref(null)
 const labelsReady = ref(false)
 const saveState = ref('') // '' | dirty | saving | saved | failed
 const selectedSummary = ref([]) // [{category, name}]
@@ -354,6 +370,7 @@ async function loadLabels() {
   const id = datasetId.value
   const reqId = ++labelsReqId
   labelsReady.value = false
+  imageMeta.value = null
   saveState.value = ''
   quality.value = ''
   refreshSelected()
@@ -367,6 +384,11 @@ async function loadLabels() {
       `/datasets/${id}/image/${encodeURIComponent(filename)}/labels`,
     )
     if (reqId !== labelsReqId || id !== datasetId.value || filename !== currentImage.value) return
+    imageMeta.value = {
+      timestamp: data.record_timestamp ? new Date(data.record_timestamp).toLocaleString('zh-CN') : '—',
+      size: Number.isFinite(data.file_size_bytes) ? `${(data.file_size_bytes / 1024).toFixed(1)} KB` : '—',
+      collector: data.collector_alias || '未知',
+    }
     const entry = queue.load(id, filename, data)
     const displayed = entry.pending || data
     const labels = Array.isArray(displayed.labels) ? displayed.labels : []
@@ -487,15 +509,17 @@ function onKeydown(e) {
     return
   }
   if (e.ctrlKey || e.metaKey || e.altKey) return
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    if (t?.closest?.('[role="slider"]')) return
+    e.preventDefault()
+    // Element Plus translates arrows on a focused tree node into clicks.
+    // Stop the event before the tree can toggle a label while we change images.
+    e.stopPropagation()
+    if (e.key === 'ArrowLeft') prev()
+    else next()
+    return
+  }
   switch (e.key) {
-    case 'ArrowLeft':
-      e.preventDefault()
-      prev()
-      break
-    case 'ArrowRight':
-      e.preventDefault()
-      next()
-      break
     case '1':
     case '2':
     case '3':
@@ -589,6 +613,11 @@ async function goTo(index) {
   currentIndex.value = Math.max(0, Math.min(index, images.value.length - 1))
 }
 
+async function jumpTo(index) {
+  await goTo(index)
+  sliderIndex.value = currentIndex.value
+}
+
 function prev() { return goTo(currentIndex.value - 1) }
 function next() { return goTo(currentIndex.value + 1) }
 
@@ -625,6 +654,8 @@ watch(currentImage, (val, old) => {
   loadLabels()
 })
 
+watch(currentIndex, index => { sliderIndex.value = index })
+
 onBeforeRouteLeave(() => flushPendingNow())
 onBeforeRouteUpdate(() => flushPendingNow())
 
@@ -639,63 +670,40 @@ onMounted(() => {
   loadDatasets()
   loadImages()
   loadCategories()
-  window.addEventListener('keydown', onKeydown)
+  window.addEventListener('keydown', onKeydown, true)
   window.addEventListener('beforeunload', onBeforeUnload)
 })
 
 onBeforeUnmount(() => {
   flushPendingNow()
-  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('keydown', onKeydown, true)
   window.removeEventListener('beforeunload', onBeforeUnload)
 })
 </script>
 
 <style scoped>
-/* ---- 页头 ---- */
-.page-head {
-  margin-bottom: var(--ts-space-5);
-}
-
 .page-title-row {
   display: flex;
   align-items: center;
   gap: var(--ts-space-3);
 }
 
-.page-title {
-  margin: 0 0 var(--ts-space-1);
-  font-size: 1.75rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.25;
-  color: var(--ts-text-primary);
-}
-
 .dataset-chip {
   padding: 2px 10px;
-  border-radius: var(--ts-radius-pill);
-  background: var(--ts-jade-100);
-  color: var(--ts-jade-800);
+  border-radius: var(--ts-radius-xs);
+  background: var(--ts-blue-soft);
+  color: var(--ts-blue);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.5;
-}
-
-.page-sub {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--ts-text-secondary);
 }
 
 .dataset-picker {
   margin-top: var(--ts-space-3);
 }
 
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: var(--ts-space-3);
+.dataset-picker .el-select {
+  max-width: 100%;
 }
 
 /* ---- 浏览布局：画布卡 + 标签树卡 ---- */
@@ -726,7 +734,7 @@ onBeforeUnmount(() => {
 .main-image {
   display: block;
   width: 100%;
-  max-height: 66vh;
+  max-height: 56vh;
   object-fit: contain;
   border-radius: var(--ts-radius-xs);
 }
@@ -763,6 +771,30 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--ts-text-tertiary);
+}
+
+.image-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ts-space-1) var(--ts-space-4);
+  margin: var(--ts-space-3) 0 0;
+  padding-top: var(--ts-space-2);
+  border-top: 1px solid var(--ts-border-subtle);
+  font-size: 0.75rem;
+}
+
+.image-meta > div {
+  display: flex;
+  gap: var(--ts-space-2);
+}
+
+.image-meta dt {
+  color: var(--ts-text-tertiary);
+}
+
+.image-meta dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- 标注面板卡 ---- */
@@ -828,7 +860,7 @@ onBeforeUnmount(() => {
 }
 
 .label-tree :deep(.el-tree-node.is-checked > .el-tree-node__content .el-tree-node__label) {
-  color: var(--ts-jade-700);
+  color: var(--ts-blue);
   font-weight: 600;
 }
 
@@ -841,9 +873,9 @@ onBeforeUnmount(() => {
 
 .sel-tag.el-tag {
   margin: 0;
-  background: var(--ts-jade-50);
-  border-color: var(--ts-jade-200);
-  color: var(--ts-jade-800);
+  background: var(--ts-blue-soft);
+  border-color: var(--ts-border-default);
+  color: var(--ts-blue);
 }
 
 .panel-foot {
@@ -880,6 +912,20 @@ onBeforeUnmount(() => {
 
 .save-state.dirty {
   color: var(--ts-warning);
+}
+
+@media (max-width: 1000px) {
+  .browse {
+    flex-direction: column;
+  }
+
+  .panel {
+    width: auto;
+  }
+
+  .panel-foot {
+    flex-wrap: wrap;
+  }
 }
 
 @keyframes soft-pulse {

@@ -25,8 +25,13 @@
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock, Thread
 from typing import Any
+from uuid import uuid4
 
 import torch
 import torch.nn as nn
@@ -39,7 +44,7 @@ from app.db import SessionLocal
 from app.labels_config import CATEGORIES, num_classes_per_head
 from app.models import factory
 from app.models.orm import Dataset, Record
-from app.services import xml_io
+from app.services import checkpoint_io, xml_io
 
 # 系统可自动识别结构的 backbone（锁定决策 8：仅保证 ResNet18/50）
 _SUPPORTED_ARCHITECTURES = {"resnet18", "resnet50"}
@@ -59,11 +64,17 @@ _BATCH_SIZE = 16
 _CONFIDENCE_ROUND = 6
 
 _UNRECOGNIZED_MSG = "无法识别模型结构，请使用系统训练产物"
+_RECENT_BATCH_JOBS = 4
+logger = logging.getLogger(__name__)
+
+
+class DatasetNotFound(ValueError):
+    """目标数据集不存在。"""
 
 
 def _category_labels() -> list[list[str]]:
     """当前标签体系：CATEGORIES 顺序的每类子标签名列表。"""
-    return [list(c["labels"]) for c in CATEGORIES]
+    return checkpoint_io.current_class_labels()
 
 
 def _category_names() -> list[str]:
@@ -92,7 +103,9 @@ def _resolve_custom_model_path(rel_path: str) -> Path:
     return resolved
 
 
-def load_model_from_dir(path: str) -> tuple[nn.Module, dict[str, Any]]:
+def load_model_from_dir(
+    path: str, *, include_digest: bool = False, allow_custom: bool = True
+) -> tuple[nn.Module, dict[str, Any]]:
     """从 checkpoint 文件重建网络并载权（REQ-6.16-3 / REQ-6.18-3）。
 
     checkpoint 契约（T13 产出）：dict 含 ``model_state``（state_dict）、
@@ -119,35 +132,25 @@ def load_model_from_dir(path: str) -> tuple[nn.Module, dict[str, Any]]:
     if not ckpt_path.is_file():
         raise ValueError(f"模型文件不存在：{ckpt_path}")
 
-    try:
-        checkpoint = torch.load(str(ckpt_path), map_location="cpu", weights_only=True)
-    except Exception:
-        # 兼容含非常规对象的系统产物（fallback 放宽；文件来自管理员可控的模型目录）
-        checkpoint = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
-
-    if not isinstance(checkpoint, dict):
-        raise ValueError(_UNRECOGNIZED_MSG)
+    checkpoint, source_sha256 = checkpoint_io.read_checkpoint(ckpt_path, include_digest=include_digest)
 
     architecture = checkpoint.get("architecture")
     num_classes = checkpoint.get("num_classes")
     model_state = checkpoint.get("model_state")
 
-    if architecture is None or num_classes is None:
+    if not isinstance(architecture, str) or not isinstance(num_classes, list):
         raise ValueError(_UNRECOGNIZED_MSG)
     is_custom = architecture == "custom"
-    if not is_custom and architecture not in _SUPPORTED_ARCHITECTURES:
+    if architecture not in _SUPPORTED_ARCHITECTURES and not (is_custom and allow_custom):
         raise ValueError(_UNRECOGNIZED_MSG)
-    if model_state is None:
+    if not isinstance(model_state, dict):
         raise ValueError(f"checkpoint 缺少 model_state 权重（文件损坏）：{ckpt_path}")
+    checkpoint_io.validate_taxonomy(checkpoint)
+    try:
+        dropout = float(checkpoint.get("dropout", 0.0))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("存档 dropout 无效") from exc
 
-    checkpoint_categories = checkpoint.get("category_names") or []
-    if checkpoint_categories and list(checkpoint_categories) != _category_names():
-        raise ValueError(
-            f"checkpoint 分类头 {list(checkpoint_categories)} 与当前标签体系 "
-            f"{_category_names()} 不一致，请确认 labels.yaml 未变更或重新训练模型"
-        )
-
-    # 结构与当前标签体系的一致性由 predict_dataset 校验（load 只负责重建）
     if is_custom:
         custom_model_path = checkpoint.get("custom_model_path")
         if not isinstance(custom_model_path, str) or not custom_model_path.strip():
@@ -162,7 +165,7 @@ def load_model_from_dir(path: str) -> tuple[nn.Module, dict[str, Any]]:
         model = factory.build_model(
             architecture,
             list(num_classes),
-            dropout=float(checkpoint.get("dropout", 0.0)),
+            dropout=dropout,
         )
     try:
         model.load_state_dict(model_state)
@@ -177,7 +180,8 @@ def load_model_from_dir(path: str) -> tuple[nn.Module, dict[str, Any]]:
         "custom_model_path": checkpoint.get("custom_model_path"),
         "num_classes": list(num_classes),
         "category_names": list(checkpoint.get("category_names") or []),
-        "dropout": float(checkpoint.get("dropout", 0.0)),
+        "dropout": dropout,
+        "source_sha256": source_sha256,
     }
     return model, meta
 
@@ -185,9 +189,7 @@ def load_model_from_dir(path: str) -> tuple[nn.Module, dict[str, Any]]:
 def _validate_model_taxonomy(model: nn.Module) -> None:
     """校验模型 4 头类别数/类别名与当前 labels.yaml 一致，否则硬失败。
 
-    子标签名不存于 checkpoint（标签唯一真相源是 labels.yaml），下标映射依赖
-    类别数逐头一致；不一致时静默映射会给出错误标签名，必须显式报错
-    （与锁定决策 6 的 taxonomy 一致性硬失败同精神）。
+    直接传入模型时额外校验头部维度。存档中的标签顺序在加载时校验。
     """
     model_nc = getattr(model, "num_classes", None)
     current_nc = num_classes_per_head()
@@ -226,18 +228,30 @@ def _prediction_entry(filename: str, head_probs: list[list[float]]) -> dict[str,
     return {"filename": filename, "predictions": predictions}
 
 
-def _iter_dataset_records(dataset_id: int) -> list[Record]:
+def _iter_dataset_records(dataset_id: int, limit: int | None = None) -> list[Record]:
     """数据集存在性校验 + 全部记录（filename 升序）。不存在 → ValueError。"""
     with SessionLocal() as db:
         if db.get(Dataset, dataset_id) is None:
-            raise ValueError(f"数据集 {dataset_id} 不存在")
-        return list(
-            db.scalars(
-                select(Record)
-                .where(Record.dataset_id == dataset_id)
-                .order_by(Record.filename)
-            ).all()
-        )
+            raise DatasetNotFound(f"数据集 {dataset_id} 不存在")
+        query = select(Record).where(Record.dataset_id == dataset_id).order_by(Record.filename)
+        return list(db.scalars(query.limit(limit)).all())
+
+
+def _load_image_tensor(record: Record) -> torch.Tensor:
+    try:
+        with Image.open(record.image_path) as image:
+            if image.width * image.height > config.MAX_IMAGE_PIXELS:
+                raise ValueError("图片像素超过限制")
+            return _INFERENCE_TRANSFORM(image.convert("RGB"))
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise ValueError(f"图片读取失败：{record.filename}（{exc}）") from exc
+
+
+def comparison_images(dataset_id: int, limit: int) -> list[tuple[str, torch.Tensor]]:
+    records = _iter_dataset_records(dataset_id, limit)
+    if not records:
+        raise ValueError("所选数据集没有可对比的图片")
+    return [(record.filename, _load_image_tensor(record).unsqueeze(0)) for record in records]
 
 
 def predict_dataset(dataset_id: int, model: nn.Module) -> list[dict[str, Any]]:
@@ -252,30 +266,101 @@ def predict_dataset(dataset_id: int, model: nn.Module) -> list[dict[str, Any]]:
         ValueError: 数据集不存在 / 模型 taxonomy 与当前标签体系不一致 /
             图片文件缺失或损坏（含文件名）。
     """
-    _validate_model_taxonomy(model)
-    records = _iter_dataset_records(dataset_id)
-    if not records:
-        return []
+    return _predict_records(_iter_dataset_records(dataset_id), model)
 
+
+def _predict_records(
+    records: list[Record],
+    model: nn.Module,
+    on_batch: Callable[[int], None] | None = None,
+) -> list[dict[str, Any]]:
+    _validate_model_taxonomy(model)
     model.eval()
     results: list[dict[str, Any]] = []
     for start in range(0, len(records), _BATCH_SIZE):
         chunk = records[start : start + _BATCH_SIZE]
-        tensors: list[torch.Tensor] = []
-        for rec in chunk:
-            image_path = Path(rec.image_path)
-            if not image_path.is_file():
-                raise ValueError(f"图片文件缺失：{rec.filename}")
-            try:
-                img = Image.open(image_path).convert("RGB")
-            except Exception as exc:
-                raise ValueError(f"图片读取失败：{rec.filename}（{exc}）") from exc
-            tensors.append(_INFERENCE_TRANSFORM(img))
-        batch = torch.stack(tensors)
+        batch = torch.stack([_load_image_tensor(rec) for rec in chunk])
         head_probs = _predict_batch(model, batch)
         for rec, probs in zip(chunk, head_probs):
             results.append(_prediction_entry(rec.filename, probs))
+        if on_batch is not None:
+            on_batch(len(results))
     return results
+
+
+class BatchInferenceBusy(Exception):
+    """The workspace has a batch inference job in progress."""
+
+
+class BatchInferenceJobs:
+    """Keep one active CPU batch and a bounded set of recent results per worker."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._jobs: dict[str, dict[str, Any]] = {}
+
+    def start(self, dataset_id: int, path: Path) -> str:
+        records = _iter_dataset_records(dataset_id)
+        with self._lock:
+            if any(job["status"] == "running" for job in self._jobs.values()):
+                raise BatchInferenceBusy
+            if len(self._jobs) >= _RECENT_BATCH_JOBS:
+                del self._jobs[next(iter(self._jobs))]
+            job_id = uuid4().hex
+            self._jobs[job_id] = {
+                "job_id": job_id, "status": "running", "processed": 0,
+                "total": len(records), "predictions": [], "error": None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            worker = Thread(target=self._run, args=(job_id, path, records), daemon=True)
+            try:
+                worker.start()
+            except RuntimeError:
+                del self._jobs[job_id]
+                raise
+            return job_id
+
+    def status(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return dict(job) if job is not None else None
+
+    def list(self) -> list[dict[str, Any]]:
+        """作业中心：最近任务摘要（不返回整批预测，只给数量）。"""
+        with self._lock:
+            jobs = sorted(
+                self._jobs.values(),
+                key=lambda job: job.get("created_at", ""),
+                reverse=True,
+            )
+            return [
+                {
+                    **{key: value for key, value in job.items() if key != "predictions"},
+                    "prediction_count": len(job.get("predictions") or []),
+                }
+                for job in jobs
+            ]
+
+    def _update(self, job_id: str, **fields: Any) -> None:
+        with self._lock:
+            self._jobs[job_id].update(fields)
+
+    def _run(self, job_id: str, path: Path, records: list[Record]) -> None:
+        try:
+            model, _ = load_model_from_dir(str(path))
+            predictions = _predict_records(
+                records, model, lambda processed: self._update(job_id, processed=processed),
+            )
+        except ValueError as exc:
+            self._update(job_id, status="failed", error=str(exc))
+        except Exception:
+            logger.exception("Batch inference job %s failed", job_id)
+            self._update(job_id, status="failed", error="批量推理失败，请联系管理员查看日志")
+        else:
+            self._update(job_id, status="completed", predictions=predictions)
+
+
+batch_jobs = BatchInferenceJobs()
 
 
 def _read_existing_xml(xml_path: Path) -> dict[str, Any] | None:
@@ -285,64 +370,49 @@ def _read_existing_xml(xml_path: Path) -> dict[str, Any] | None:
     return None
 
 
-def _record_for_filename(dataset_id: int, filename: str) -> Record:
-    """按 (dataset_id, filename) 定位记录；不存在 → ValueError。"""
-    with SessionLocal() as db:
-        rec = db.scalars(
-            select(Record).where(
-                Record.dataset_id == dataset_id,
-                Record.filename == filename,
-            )
-        ).first()
-        if rec is None:
-            raise ValueError(f"图片 {filename} 不存在于数据集 {dataset_id}")
-        return rec
-
-
-def generate_preannotation_xml(dataset_id: int, model: nn.Module) -> int:
+def generate_preannotation_xml(
+    dataset_id: int, model: nn.Module, *, confidence_threshold: float = 0.0
+) -> int:
     """基于预测结果生成预标注 XML（REQ-6.18），返回生成数量。
 
     规则：
-    - 仅处理同名 XML **labels 为空**（含 XML 缺失）的图片——已有手动标注的
-      图片跳过，绝不覆盖（REQ-6.18-4）；
+    - 跳过已有标签或明确为人工编辑的 XML（包括人工清空标签）；
     - 预标注与人工标注共用 ``xml_io.write_xml``（同 schema，REQ-6.18-1），
       写到图片旁（同一位置，标注界面 T10 直接读取）；
-    - 每张写 4 个 label（每 category 一个），confidence = 预测概率 [0, 1]
-      （REQ-6.18-2）；
+    - 保存达到阈值的预测标签，confidence = 预测概率 [0, 1]；
     - 保留既有 XML 的 folder/filename/path/size/quality（缺失时以数据集名/
       文件名兜底，quality 空字符串）。
     """
     predictions = predict_dataset(dataset_id, model)
 
-    with SessionLocal() as db:
-        dataset = db.get(Dataset, dataset_id)
-        if dataset is None:
-            raise ValueError(f"数据集 {dataset_id} 不存在")
-        dataset_name = dataset.name
-
     written = 0
     for entry in predictions:
         filename = entry["filename"]
-        rec = _record_for_filename(dataset_id, filename)
-        xml_path = Path(rec.image_path).with_suffix(".xml")
-
-        existing = _read_existing_xml(xml_path)
-        if existing is not None and existing.get("labels"):
-            continue  # 已有人工标注：不覆盖
-
-        data: dict[str, Any] = {
-            **(existing or {}),
-            "annotation_source": "model",
-            "folder": (existing or {}).get("folder") or dataset_name,
-            "filename": (existing or {}).get("filename") or filename,
-            "path": (existing or {}).get("path") or f"{dataset_id}/{filename}",
-            "size": (existing or {}).get("size"),
-            "quality": (existing or {}).get("quality", ""),
-            "labels": [
-                {"category": p["category"], "name": p["label"], "confidence": p["confidence"]}
-                for p in entry["predictions"]
-            ],
-        }
-        xml_io.write_xml(xml_path, data)
+        labels = [{"category": p["category"], "name": p["label"], "confidence": p["confidence"]}
+                  for p in entry["predictions"] if p["confidence"] >= confidence_threshold]
+        if not labels:
+            continue
+        with SessionLocal() as db:
+            # 与人工保存使用同一 SQLite 写锁；推理完成后再加锁读最新 XML。
+            if db.get_bind().dialect.name == "sqlite":
+                db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            rec = db.scalar(select(Record).where(Record.dataset_id == dataset_id, Record.filename == filename))
+            if rec is None:
+                continue
+            xml_path = Path(rec.image_path).with_suffix(".xml")
+            existing = _read_existing_xml(xml_path) or {}
+            if existing.get("labels") or existing.get("annotation_source") == "human":
+                continue
+            data = {
+                **existing,
+                "annotation_source": "model",
+                "folder": existing.get("folder") or rec.dataset.name,
+                "filename": existing.get("filename") or filename,
+                "path": existing.get("path") or f"{dataset_id}/{filename}",
+                "size": existing.get("size"),
+                "quality": existing.get("quality", rec.quality or ""),
+                "labels": labels,
+            }
+            xml_io.write_xml(xml_path, data)
         written += 1
     return written

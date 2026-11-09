@@ -1,27 +1,30 @@
-/**
- * 四诊标注训练平台 — 主题 token（高级柔和风）
- *
- * 唯一权威来源：frontend/DESIGN.md（第 2-7 节）。
- * 本文件只做两件事：
- *   1) 声明 DESIGN.md 中的全部设计 token（--ts-*）；
- *   2) 把这些 token 映射到 Element Plus 的 CSS 变量（--el-*），
- *      让 el-button/el-card/el-table/el-dialog 等基础件直接拾取主题。
- * 禁止在本文件引入 DESIGN.md 之外的新色值。
- */
+/* 工作台主题，设计约定见 frontend/DESIGN.md。 */
 
 :root {
-  /* ============ 2.1 中性色（暖纸白阶） ============ */
-  --ts-bg-canvas: #f4f6f2;
+  --ts-bg-canvas: #f0f2f5;
   --ts-surface-base: #ffffff;
-  --ts-surface-raised: #fbfdfb;
-  --ts-surface-sunken: #eef1eb;
-  --ts-text-primary: #22302a;
-  --ts-text-secondary: #59665f;
-  --ts-text-tertiary: #8d9a92;
-  --ts-text-disabled: #b7c0ba;
-  --ts-border-default: #dde3da;
-  --ts-border-subtle: #eaeeda;
-  --ts-border-strong: #cdd6cb;
+  --ts-surface-raised: #f8fafc;
+  --ts-surface-sunken: #edf1f6;
+  --ts-text-primary: #172b43;
+  --ts-text-secondary: #4b5d71;
+  --ts-text-tertiary: #617286;
+  --ts-text-disabled: #a3afbd;
+  --ts-border-default: #d9e2ed;
+  --ts-border-subtle: #e5ebf2;
+  --ts-border-strong: #bac9da;
+
+  --ts-blue: #225bb4;
+  --ts-blue-hover: #174a96;
+  --ts-blue-soft: #eaf3ff;
+  --ts-sidebar-bg: #0f2744;
+  --ts-sidebar-text: #dce7f6;
+  --ts-sidebar-muted: #a5b9d0;
+  --ts-sidebar-active: #82c5ff;
+  --ts-sidebar-highlight: #1d3c60;
+  --ts-sidebar-border: #243e5c;
+  --ts-admin-sidebar-width: 232px;
+  --ts-admin-toolbar-height: 56px;
+  --ts-admin-content-width: 1440px;
 
   /* ============ 2.2 青玉强调色（多档感知渐变） ============ */
   --ts-jade-50: #eef6f0;
@@ -34,19 +37,13 @@
   --ts-jade-700: #256240;
   --ts-jade-800: #1d4d32;
   --ts-jade-900: #163c27;
-  --ts-focus-ring: hsla(150, 42%, 41%, 0.35);
-  --ts-hover-tint: hsla(150, 25%, 50%, 0.08);
+  --ts-hover-tint: var(--ts-blue-soft);
 
   /* ============ 2.3 语义色（降饱和） ============ */
   --ts-success: #3d9260;
   --ts-warning: #b07d2e;
   --ts-danger: #c25454;
   --ts-info: #5c7f96;
-
-  /* ============ 2.4 大气层 token（仅壳层背景用） ============ */
-  --ts-atmo-jade: hsla(150, 45%, 60%, 0.1);
-  --ts-atmo-mist: hsla(95, 35%, 65%, 0.08);
-  --ts-atmo-warm: hsla(40, 30%, 80%, 0.14);
 
   /* ============ 3. Typography ============ */
   --ts-font-primary: 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei',
@@ -77,30 +74,19 @@
   --ts-radius-lg: 16px;
   --ts-radius-pill: 999px;
 
-  --ts-shadow-subtle: 0 1px 2px hsla(150, 20%, 28%, 0.05),
-    0 1px 1px hsla(150, 20%, 28%, 0.04);
-  --ts-shadow-default: 0 2px 8px hsla(150, 22%, 24%, 0.06),
-    0 1px 2px hsla(150, 22%, 24%, 0.04);
-  --ts-shadow-raised: 0 6px 16px hsla(150, 24%, 22%, 0.08),
-    0 2px 4px hsla(150, 24%, 22%, 0.05);
-  --ts-shadow-prominent: 0 12px 32px hsla(150, 26%, 20%, 0.12),
-    0 2px 8px hsla(150, 26%, 20%, 0.06);
+  --ts-shadow-subtle: 0 1px 2px hsla(215, 40%, 25%, 0.04);
+  --ts-shadow-default: 0 1px 3px hsla(215, 40%, 25%, 0.08);
+  --ts-shadow-raised: 0 4px 12px hsla(215, 40%, 25%, 0.1);
+  --ts-shadow-prominent: 0 12px 32px hsla(215, 40%, 25%, 0.16);
 
-  /* 玻璃配方（多层，仅导航胶囊使用，见 DESIGN.md 7.1） */
-  --ts-glass-bg: hsla(165, 24%, 99%, 0.78);
-  --ts-glass-border: hsla(150, 22%, 45%, 0.16);
-  --ts-glass-highlight: hsla(0, 0%, 100%, 0.75);
-  --ts-glass-shadow: 0 8px 28px hsla(150, 28%, 20%, 0.1);
-
-  /* ============ Element Plus 主变量覆写 ============ */
-  /* 主色 → 青玉渐变（DESIGN.md 2.2 同一档位，不新造色值） */
-  --el-color-primary: var(--ts-jade-500);
-  --el-color-primary-light-3: var(--ts-jade-300);
-  --el-color-primary-light-5: var(--ts-jade-200);
-  --el-color-primary-light-7: var(--ts-jade-100);
-  --el-color-primary-light-8: #e6f5ea; /* jade-50 与 jade-100 之间 */
-  --el-color-primary-light-9: var(--ts-jade-50);
-  --el-color-primary-dark-2: var(--ts-jade-600);
+  /* 蓝色用于操作，状态继续使用独立语义色。 */
+  --el-color-primary: var(--ts-blue);
+  --el-color-primary-light-3: #467bc6;
+  --el-color-primary-light-5: #8faeda;
+  --el-color-primary-light-7: #bfd3ee;
+  --el-color-primary-light-8: #d8e6f7;
+  --el-color-primary-light-9: var(--ts-blue-soft);
+  --el-color-primary-dark-2: var(--ts-blue-hover);
 
   /* 语义色（光阶为 DESIGN.md 2.3 主色的派生态调） */
   --el-color-success: var(--ts-success);
@@ -143,14 +129,14 @@
   --el-color-info-light-9: #edf1f3;
   --el-color-info-dark-2: #4a6678;
 
-  /* 文字 → 青墨中性阶 */
+  /* 文字 */
   --el-text-color-primary: var(--ts-text-primary);
   --el-text-color-regular: var(--ts-text-primary);
   --el-text-color-secondary: var(--ts-text-secondary);
   --el-text-color-placeholder: var(--ts-text-tertiary);
   --el-text-color-disabled: var(--ts-text-disabled);
 
-  /* 描边 → 暖纸白发丝阶 */
+  /* 描边 */
   --el-border-color: var(--ts-border-default);
   --el-border-color-light: var(--ts-border-subtle);
   --el-border-color-lighter: var(--ts-border-subtle);
@@ -168,14 +154,14 @@
   --el-bg-color: var(--ts-surface-base);
   --el-bg-color-page: var(--ts-bg-canvas);
   --el-bg-color-overlay: var(--ts-surface-base);
-  --el-mask-color: hsla(150, 20%, 12%, 0.45);
+  --el-mask-color: hsla(215, 38%, 18%, 0.45);
 
   /* 圆角（DESIGN.md 7.3） */
   --el-border-radius-base: var(--ts-radius-sm);
   --el-border-radius-small: var(--ts-radius-xs);
   --el-border-radius-round: var(--ts-radius-pill);
 
-  /* 阴影 → 青玉色调（DESIGN.md 7.2） */
+  /* 阴影 */
   --el-box-shadow: var(--ts-shadow-raised);
   --el-box-shadow-light: var(--ts-shadow-default);
   --el-box-shadow-lighter: var(--ts-shadow-subtle);
@@ -184,12 +170,6 @@
   /* 字体 */
   --el-font-family: var(--ts-font-primary);
   --el-font-size-base: 14px;
-
-  /* 表格（EP 组件级变量可在 :root 声明） */
-  --el-table-border-color: var(--ts-border-subtle);
-  --el-table-header-bg-color: var(--ts-surface-sunken);
-  --el-table-header-text-color: var(--ts-text-secondary);
-  --el-table-row-hover-bg-color: var(--ts-jade-50);
 
   /* 组件高度与内距（整体更轻） */
   --el-component-size-small: 26px;
@@ -217,21 +197,60 @@ body {
 
 /* 可见焦点环（a11y 要求，redesign-skill） */
 :focus-visible {
-  outline: 2px solid var(--ts-jade-500);
+  outline: 2px solid var(--ts-blue);
   outline-offset: 2px;
 }
 
-/* 数值对齐：表格单元格默认 tabular-nums */
+.app-page .page-head {
+  margin-bottom: var(--ts-space-5);
+}
+
+.app-page .page-title {
+  /* 页面标题已提升到顶栏（WorkBuddy 原型同款），内容区只保留说明与工具条。 */
+  display: none;
+}
+
+.app-page .page-sub {
+  margin: 0;
+  color: var(--ts-text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.app-page .toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ts-space-2) var(--ts-space-3);
+}
+
+.app-page .toolbar > * {
+  max-width: 100%;
+}
+
+.app-page .toolbar .el-button + .el-button {
+  margin-left: 0;
+}
+
+.app-page .toolbar-spacer {
+  flex: 1;
+}
+
+.el-table {
+  --el-table-border-color: var(--ts-border-subtle);
+  --el-table-header-bg-color: var(--ts-surface-raised);
+  --el-table-header-text-color: var(--ts-text-secondary);
+  --el-table-row-hover-bg-color: var(--ts-blue-soft);
+}
+
 .el-table .cell {
   font-variant-numeric: tabular-nums;
 }
 
 /* ============ 基础件精修（对应 DESIGN.md 第 5 节） ============ */
 
-/* 5.1 Button：主按钮 = 青玉胶囊（supabase 惯例：pill 仅主 CTA） */
 .el-button--primary {
-  border-radius: var(--ts-radius-pill);
-  font-weight: 500;
+  border-radius: var(--ts-radius-sm);
 }
 .el-button {
   font-weight: 500;
@@ -242,17 +261,12 @@ body {
   transform: scale(0.98);
 }
 
-/* 5.2 Card：暖白表面 + 青玉色调阴影 + 发丝描边 */
 .el-card {
-  border-radius: var(--ts-radius-md);
-  border-color: var(--ts-border-subtle);
-  box-shadow: var(--ts-shadow-default);
-  transition: box-shadow var(--ts-motion-standard), transform var(--ts-motion-standard);
+  border-radius: var(--ts-radius-sm);
+  border-color: var(--ts-border-default);
 }
-.el-card.is-hover-shadow:hover,
-.el-card:not(.is-never-shadow):hover {
-  box-shadow: var(--ts-shadow-raised);
-  transform: translateY(-1px);
+.el-card.is-always-shadow {
+  box-shadow: var(--ts-shadow-subtle);
 }
 .el-card__header {
   border-bottom-color: var(--ts-border-subtle);
@@ -262,6 +276,11 @@ body {
 .el-dialog {
   border-radius: var(--ts-radius-lg);
   box-shadow: var(--ts-shadow-prominent);
+}
+@media (max-width: 768px) {
+  .el-dialog {
+    max-width: calc(100vw - var(--ts-space-8));
+  }
 }
 .el-dialog__header {
   padding-bottom: var(--ts-space-3);
@@ -284,7 +303,7 @@ body {
   box-shadow: var(--ts-shadow-prominent);
 }
 
-/* 5.3 Input：focus 时青玉描边由 --el-color-primary 自动生效，仅微调 hover 手感 */
+/* 输入框保留 Element Plus 的焦点描边。 */
 .el-input__wrapper,
 .el-textarea__inner,
 .el-select__wrapper {
