@@ -58,6 +58,10 @@ CORS_ORIGINS = [
     o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()
 ]
 
+# --- 上传与资源限制（NF-7.4）---
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(256 * 1024 * 1024)))
+MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(24_000_000)))
+
 
 def ensure_dirs() -> None:
     """确保数据目录树存在（StaticFiles 挂载要求目录已存在）。"""

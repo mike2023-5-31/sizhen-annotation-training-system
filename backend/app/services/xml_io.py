@@ -152,8 +152,13 @@ def write_xml(path: Any, data: Dict[str, Any]) -> None:
     """原子写标注 XML：同目录临时文件 + os.replace，崩溃/并发不留半截文件。"""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    write_bytes_atomic(target, _serialize(data))
 
-    payload = _serialize(data)
+
+def write_bytes_atomic(path: Any, payload: bytes) -> None:
+    """通用原子写：临时文件 + os.replace，任意二进制内容均可。"""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
     )
