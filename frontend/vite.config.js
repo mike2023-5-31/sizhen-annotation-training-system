@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
-// Dev server proxies API + WebSocket traffic to the FastAPI backend.
+// 开发期将 API / 静态图片 / WebSocket 请求代理到 FastAPI 后端。
 export default defineConfig({
   plugins: [vue()],
   server: {
@@ -10,10 +10,10 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
-      },
-      '/ws': {
-        target: 'http://localhost:8000',
         ws: true,
+      },
+      '/static': {
+        target: 'http://localhost:8000',
         changeOrigin: true,
       },
     },
