@@ -4,14 +4,14 @@
       <template #header>训练配置</template>
       <el-form label-width="110px">
         <el-form-item label="主训练集">
-          <el-select v-model="config.datasets" multiple placeholder="选择数据集（首个为主集）" style="width: 100%">
+          <el-select v-model="config.datasets" multiple :disabled="!!resumePath" placeholder="选择数据集（首个为主集）" style="width: 100%">
             <el-option v-for="d in datasets" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
         </el-form-item>
         <el-row :gutter="12">
           <el-col :span="8">
             <el-form-item label="骨干网络">
-              <el-select v-model="config.backbone" style="width: 100%">
+              <el-select v-model="config.backbone" :disabled="!!resumePath" style="width: 100%">
                 <el-option label="ResNet18" value="resnet18" />
                 <el-option label="ResNet50" value="resnet50" />
                 <el-option label="自定义模型" value="custom" />
@@ -20,12 +20,12 @@
           </el-col>
           <el-col :span="8">
             <el-form-item label="学习率">
-              <el-input-number v-model="config.lr" :step="0.0001" :min="0.0001" :max="1" style="width: 100%" />
+              <el-input-number v-model="config.lr" :step="0.0001" :min="0.0001" :max="1" :disabled="!!resumePath" style="width: 100%" />
             </el-form-item>
           </el-col>
           <el-col :span="8">
             <el-form-item label="批量大小">
-              <el-input-number v-model="config.batch_size" :min="1" :max="512" style="width: 100%" />
+              <el-input-number v-model="config.batch_size" :min="1" :max="512" :disabled="!!resumePath" style="width: 100%" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -37,7 +37,7 @@
           </el-col>
           <el-col :span="8">
             <el-form-item label="优化器">
-              <el-select v-model="config.optimizer" style="width: 100%">
+              <el-select v-model="config.optimizer" :disabled="!!resumePath" style="width: 100%">
                 <el-option label="Adam" value="adam" />
                 <el-option label="AdamW" value="adamw" />
                 <el-option label="SGD" value="sgd" />
@@ -46,7 +46,7 @@
           </el-col>
           <el-col :span="8">
             <el-form-item label="损失函数">
-              <el-select v-model="config.loss" style="width: 100%">
+              <el-select v-model="config.loss" :disabled="!!resumePath" style="width: 100%">
                 <el-option label="CrossEntropy" value="crossentropy" />
                 <el-option label="FocalLoss" value="focalloss" />
               </el-select>
@@ -56,32 +56,32 @@
         <el-row :gutter="12">
           <el-col :span="8">
             <el-form-item label="Dropout">
-              <el-input-number v-model="config.dropout" :step="0.1" :min="0" :max="0.9" style="width: 100%" />
+              <el-input-number v-model="config.dropout" :step="0.1" :min="0" :max="0.9" :disabled="!!resumePath" style="width: 100%" />
             </el-form-item>
           </el-col>
           <el-col :span="8">
             <el-form-item label="验证集比例">
-              <el-input-number v-model="config.val_split" :step="0.1" :min="0.1" :max="0.9" style="width: 100%" />
+              <el-input-number v-model="config.val_split" :step="0.1" :min="0.1" :max="0.9" :disabled="!!resumePath" style="width: 100%" />
             </el-form-item>
           </el-col>
           <el-col :span="8">
             <el-form-item label="FP16">
-              <el-switch v-model="config.fp16" />
+              <el-switch v-model="config.fp16" :disabled="!!resumePath" />
             </el-form-item>
           </el-col>
         </el-row>
         <el-form-item v-if="config.backbone === 'custom'" label="模型源码">
-          <input type="file" accept=".py" :disabled="running || uploading" @change="uploadCustom" />
+          <input type="file" accept=".py" :disabled="running || uploading || !!resumePath" @change="uploadCustom" />
           <span>{{ config.custom_model_path || '上传含 build_model(num_classes) 函数的 Python 文件' }}</span>
         </el-form-item>
         <el-form-item label="断点续训">
           <el-select v-model="resumePath" clearable placeholder="不选择则开始新训练" style="width: 100%" @visible-change="(visible) => visible && loadModels()">
             <el-option v-for="m in models" :key="m.model_path" :label="m.model_path" :value="m.model_path" />
           </el-select>
-          <span v-if="resumePath">沿用存档的模型与配置；上方训练轮数为目标总轮数。</span>
+          <span v-if="resumePath">续训沿用存档的模型与配置（相关控件已禁用）；仅「训练轮数」可改为目标总轮数。</span>
         </el-form-item>
         <el-form-item label="数据增强">
-          <el-checkbox-group v-model="config.augmentation">
+          <el-checkbox-group v-model="config.augmentation" :disabled="!!resumePath">
             <el-checkbox value="flip">水平翻转</el-checkbox>
             <el-checkbox value="rotate">旋转</el-checkbox>
             <el-checkbox value="colorjitter">颜色抖动</el-checkbox>

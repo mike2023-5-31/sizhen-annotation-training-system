@@ -8,7 +8,7 @@
       <el-button @click="doSearch">搜索</el-button>
       <el-button @click="clearSearch">全部</el-button>
       <span class="pos" v-if="images.length">{{ index + 1 }} / {{ images.length }}</span>
-      <el-slider v-model="index" :max="images.length - 1" :disabled="!images.length" class="slider" />
+      <el-slider v-model="index" :max="Math.max(0, images.length - 1)" :disabled="!images.length" class="slider" />
     </div>
 
     <div class="body" v-if="currentFilename">
