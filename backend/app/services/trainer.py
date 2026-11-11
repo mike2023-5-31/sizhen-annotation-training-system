@@ -111,6 +111,16 @@ def _parse_targets(data: dict[str, Any]) -> list[int]:
     return targets
 
 
+def _collect_active_heads(samples: list[Sample], num_heads: int) -> list[int]:
+    """返回在样本中出现过标注的分类头索引（训练时缺失的维度不进入）。"""
+    active = [False] * num_heads
+    for sample in samples:
+        for h, t in enumerate(sample.targets):
+            if t >= 0:
+                active[h] = True
+    return [h for h, ok in enumerate(active) if ok]
+
+
 def collect_samples(dataset_ids: list[int]) -> list[Sample]:
     """从多个数据集收集带有效标注的样本（合并训练）。"""
     samples: list[Sample] = []
@@ -482,6 +492,7 @@ class TrainManager:
                 raise ValueError("所选数据集没有可用于训练的标注样本")
 
             head_sizes = num_classes_per_head()
+            active_heads = _collect_active_heads(samples, len(head_sizes))
             model = build_model(cfg)
             device, n_gpus, use_amp = detect_device(cfg)
 
@@ -607,6 +618,7 @@ class TrainManager:
                     "config": cfg,
                     "architecture": cfg["backbone"],
                     "num_classes": head_sizes,
+                    "active_heads": active_heads,
                     "category_names": [item["name"] for item in CATEGORIES],
                     "class_labels": checkpoint.current_class_labels(),
                     "custom_model_path": cfg.get("custom_model_path"),

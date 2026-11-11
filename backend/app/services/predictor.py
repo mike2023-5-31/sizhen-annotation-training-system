@@ -39,6 +39,39 @@ def _category_label_maps() -> tuple[list[str], list[list[str]]]:
     return names, labels
 
 
+def _dataset_categories(dataset_id: int) -> list[str]:
+    """扫描数据集所有 XML，返回出现过的 category（按标签体系顺序）。"""
+    with SessionLocal() as db:
+        records = list(
+            db.scalars(select(Record).where(Record.dataset_id == dataset_id))
+        )
+    seen: set[str] = set()
+    for rec in records:
+        xml_path = Path(rec.image_path).with_suffix(".xml")
+        if not xml_path.is_file():
+            continue
+        try:
+            data = xml_io.read_xml(xml_path)
+        except Exception:  # noqa: BLE001
+            continue
+        for label in data.get("labels", []):
+            if label.get("category") and float(label.get("confidence", 1.0)) >= 1.0:
+                seen.add(label["category"])
+    order = [item["name"] for item in CATEGORIES]
+    return [name for name in order if name in seen]
+
+
+def _resolve_active_heads(dataset_id: int, active_heads: list[int] | None) -> list[int]:
+    """确定要输出的分类头索引：优先数据集实际维度，回退模型训练维度，最后回退全部。"""
+    order = [item["name"] for item in CATEGORIES]
+    dataset_cats = _dataset_categories(dataset_id)
+    if dataset_cats:
+        return [order.index(name) for name in dataset_cats]
+    if active_heads:
+        return [h for h in active_heads if 0 <= h < len(order)]
+    return list(range(len(order)))
+
+
 def load_model(path: str | Path, allow_custom: bool = True) -> tuple[torch.nn.Module, dict[str, Any]]:
     """从 checkpoint 重建网络并载入权重，返回 (model, meta)。"""
     ckpt = checkpoint.load_checkpoint(path)
@@ -66,15 +99,19 @@ def load_model(path: str | Path, allow_custom: bool = True) -> tuple[torch.nn.Mo
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"权重与模型结构不匹配：{exc}") from exc
     model.eval()
-    return model, {"architecture": architecture, "num_classes": num_classes}
+    return model, {
+        "architecture": architecture,
+        "num_classes": num_classes,
+        "active_heads": ckpt.get("active_heads"),
+    }
 
 
-def _predict_one(model: torch.nn.Module, tensor: torch.Tensor, device: torch.device) -> list[dict[str, Any]]:
+def _predict_one(model: torch.nn.Module, tensor: torch.Tensor, device: torch.device, heads: list[int]) -> list[dict[str, Any]]:
     names, labels = _category_label_maps()
     with torch.no_grad():
         outputs = model(tensor.unsqueeze(0).to(device))
     predictions = []
-    for head in range(4):
+    for head in heads:
         probs = torch.softmax(outputs[head], dim=1)[0].cpu()
         best = int(torch.argmax(probs))
         predictions.append(
@@ -87,8 +124,12 @@ def _predict_one(model: torch.nn.Module, tensor: torch.Tensor, device: torch.dev
     return predictions
 
 
-def predict_dataset(dataset_id: int, model: torch.nn.Module) -> list[dict[str, Any]]:
-    """对数据集全部图片做批量预测。"""
+def predict_dataset(
+    dataset_id: int,
+    model: torch.nn.Module,
+    active_heads: list[int] | None = None,
+) -> dict[str, Any]:
+    """对数据集全部图片做批量预测，仅输出该数据集实际包含的维度。"""
     with SessionLocal() as db:
         if db.get(Dataset, dataset_id) is None:
             raise DatasetNotFound(f"数据集 {dataset_id} 不存在")
@@ -96,6 +137,8 @@ def predict_dataset(dataset_id: int, model: torch.nn.Module) -> list[dict[str, A
             db.scalars(select(Record).where(Record.dataset_id == dataset_id).order_by(Record.filename))
         )
 
+    heads = _resolve_active_heads(dataset_id, active_heads)
+    order = [item["name"] for item in CATEGORIES]
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -106,19 +149,20 @@ def predict_dataset(dataset_id: int, model: torch.nn.Module) -> list[dict[str, A
             raise ValueError(f"图片文件缺失：{rec.filename}")
         try:
             tensor = _preprocess(image_path)
-            predictions = _predict_one(model, tensor, device)
+            predictions = _predict_one(model, tensor, device, heads)
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"图片 {rec.filename} 推理失败：{exc}") from exc
         results.append({"filename": rec.filename, "predictions": predictions})
-    return results
+    return {"categories": [order[h] for h in heads], "predictions": results}
 
 
 def generate_preannotation_xml(
     dataset_id: int,
     model: torch.nn.Module,
     confidence_threshold: float = 0.0,
+    active_heads: list[int] | None = None,
 ) -> int:
-    """基于预测为未人工标注的图片生成预标注 XML，返回生成数量。"""
+    """基于预测为未人工标注的图片生成预标注 XML，仅针对数据集实际维度，返回生成数量。"""
     with SessionLocal() as db:
         if db.get(Dataset, dataset_id) is None:
             raise DatasetNotFound(f"数据集 {dataset_id} 不存在")
@@ -126,6 +170,7 @@ def generate_preannotation_xml(
             db.scalars(select(Record).where(Record.dataset_id == dataset_id).order_by(Record.filename))
         )
 
+    heads = _resolve_active_heads(dataset_id, active_heads)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -137,12 +182,12 @@ def generate_preannotation_xml(
         xml_path = image_path.with_suffix(".xml")
         if xml_path.is_file():
             existing = xml_io.read_xml(xml_path)
-            if existing.get("labels"):
+            if any(float(l.get("confidence", 1.0)) >= 1.0 for l in existing.get("labels", [])):
                 continue  # 已有人工标注，不覆盖
 
         try:
             tensor = _preprocess(image_path)
-            predictions = _predict_one(model, tensor, device)
+            predictions = _predict_one(model, tensor, device, heads)
         except Exception:  # noqa: BLE001
             continue
 

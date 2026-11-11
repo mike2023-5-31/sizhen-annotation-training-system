@@ -27,7 +27,7 @@
       <template #header>预测结果（{{ results.length }} 张）</template>
       <el-table :data="results" border max-height="560">
         <el-table-column prop="filename" label="文件名" width="180" fixed />
-        <el-table-column v-for="cat in headNames" :key="cat" :label="cat" min-width="200">
+        <el-table-column v-for="cat in resultCategories" :key="cat" :label="cat" min-width="200">
           <template #default="{ row }">
             <div v-for="p in row.predictions.filter((x) => x.category === cat)" :key="p.label">
               <b>{{ p.label }}</b>
@@ -51,8 +51,8 @@ const modelPath = ref('')
 const datasetId = ref(null)
 const threshold = ref(0)
 const results = ref([])
+const resultCategories = ref([])
 const predicting = ref(false)
-const headNames = ['舌', '面', '脉', '声音']
 
 async function load() {
   const [m, d] = await Promise.all([api.get('/inference/models'), api.get('/datasets')])
@@ -69,6 +69,7 @@ async function doPredict() {
       dataset_id: datasetId.value,
     })
     results.value = data.predictions
+    resultCategories.value = data.categories || []
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '预测失败')
   } finally {

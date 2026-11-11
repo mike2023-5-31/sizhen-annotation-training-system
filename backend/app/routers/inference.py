@@ -32,23 +32,27 @@ def list_models() -> dict[str, list[str]]:
 
 
 @router.post("/predict")
-def predict(body: PredictRequest) -> dict[str, list[dict[str, Any]]]:
-    model, _ = _load_or_404(body.model_path)
+def predict(body: PredictRequest) -> dict[str, Any]:
+    model, meta = _load_or_404(body.model_path)
     try:
-        predictions = predictor.predict_dataset(body.dataset_id, model)
+        return predictor.predict_dataset(
+            body.dataset_id, model, active_heads=meta.get("active_heads")
+        )
     except predictor.DatasetNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"predictions": predictions}
 
 
 @router.post("/preannotation")
 def preannotation(body: PreannotationRequest) -> dict[str, int]:
-    model, _ = _load_or_404(body.model_path)
+    model, meta = _load_or_404(body.model_path)
     try:
         generated = predictor.generate_preannotation_xml(
-            body.dataset_id, model, confidence_threshold=body.confidence_threshold
+            body.dataset_id,
+            model,
+            confidence_threshold=body.confidence_threshold,
+            active_heads=meta.get("active_heads"),
         )
     except predictor.DatasetNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
