@@ -1,15 +1,17 @@
 """数据集增删改查 + 内置库按时段拉取（6.1 / 6.2b）。"""
 from __future__ import annotations
 
+import hashlib
 import shutil
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy import select
 
 from app import config
 from app.db import SessionLocal
 from app.models.orm import Dataset, Record
+from app.services import xml_io
 
 
 def _to_utc_naive(value: datetime) -> datetime:
@@ -109,15 +111,36 @@ def pull_records(
             src_image = Path(source.image_path)
             if not src_image.is_file():
                 continue
-            dest_image = target_dir / source.filename
+            # 目标目录已有同名文件时重命名，避免覆盖已有数据
+            dest_name = source.filename
+            if (target_dir / dest_name).exists():
+                stem = PurePosixPath(dest_name).stem
+                suffix = PurePosixPath(dest_name).suffix
+                digest = hashlib.sha256(
+                    f"{source.id}:{dest_name}".encode()
+                ).hexdigest()[:8]
+                dest_name = f"{stem}-{digest}{suffix}"
+
+            dest_image = target_dir / dest_name
             shutil.copyfile(src_image, dest_image)
+            dest_xml = dest_image.with_suffix(".xml")
             src_xml = src_image.with_suffix(".xml")
             if src_xml.is_file():
-                shutil.copyfile(src_xml, dest_image.with_suffix(".xml"))
+                shutil.copyfile(src_xml, dest_xml)
+                # 重写 XML 的 folder/filename/path，避免指向源数据集造成漂移
+                data = xml_io.read_xml(dest_xml)
+                data.update(
+                    {
+                        "folder": target.name,
+                        "filename": dest_name,
+                        "path": str(dest_image),
+                    }
+                )
+                xml_io.write_xml(dest_xml, data)
             db.add(
                 Record(
                     dataset_id=target_dataset_id,
-                    filename=source.filename,
+                    filename=dest_name,
                     image_path=str(dest_image),
                     timestamp=source.timestamp,
                     quality=source.quality,
